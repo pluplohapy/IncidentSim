@@ -24,11 +24,6 @@ const (
 	KindStress      = "stress"
 )
 
-// Kinds lists the supported fault kinds in a stable order.
-func Kinds() []string {
-	return []string{KindFeatureFlag, KindSQLConfig, KindKill, KindNetwork, KindStress}
-}
-
 // Errors of the injector subsystem.
 var (
 	// ErrUnknownKind means no injector is registered for a manifest fault.
