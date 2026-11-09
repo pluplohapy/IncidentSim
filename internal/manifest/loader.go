@@ -358,15 +358,16 @@ func (m *Manifest) validateDistractors() []Issue {
 }
 
 // ValidateWithAssets additionally checks that files referenced by the manifest
-// exist next to the catalog, so a task never starts with a missing replay
-// profile.
-func (m *Manifest) ValidateWithAssets(catalogDir string) error {
+// exist in the repository, so a task never starts with a missing replay
+// profile. Asset paths are relative to the project root, the same way they
+// appear on disk.
+func (m *Manifest) ValidateWithAssets(projectRoot string) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
 	var issues []Issue
 	if m.Spec.Replay != nil && m.Spec.Replay.Profile != "" {
-		profile := filepath.Join(catalogDir, m.Spec.Replay.Profile)
+		profile := filepath.Join(projectRoot, m.Spec.Replay.Profile)
 		if _, err := os.Stat(profile); err != nil {
 			issues = append(issues, Issue{
 				Field:   "spec.replay.profile",

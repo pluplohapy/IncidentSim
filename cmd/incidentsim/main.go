@@ -146,7 +146,9 @@ func serve(args []string) error {
 		adapters["compose"] = compose.New(config.StateDir())
 	}
 
-	orchestrator, err := core.New(config, catalog, adapters, injector.DefaultRegistry(), verifier.NewManifestVerifier())
+	grader := verifier.NewManifestVerifier()
+	grader.ProjectDir = config.ProjectDir()
+	orchestrator, err := core.New(config, catalog, adapters, injector.DefaultRegistry(), grader)
 	if err != nil {
 		return err
 	}

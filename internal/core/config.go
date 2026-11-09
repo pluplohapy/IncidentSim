@@ -116,10 +116,9 @@ func (c Config) StateDir() string { return absOrSelf(c.State) }
 // JournalDir is where per-session event logs live.
 func (c Config) JournalDir() string { return filepath.Join(c.StateDir(), "journal") }
 
-// WorkloadsDir returns the absolute workload directory next to the catalog.
-func (c Config) WorkloadsDir() string {
-	return filepath.Join(filepath.Dir(c.CatalogDir()), "workloads")
-}
+// ProjectDir returns the root the manifest asset paths are relative to, i.e.
+// the parent of the catalog directory: that is where workloads/ live.
+func (c Config) ProjectDir() string { return filepath.Dir(c.CatalogDir()) }
 
 func absOrSelf(path string) string {
 	if filepath.IsAbs(path) {
