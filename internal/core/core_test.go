@@ -214,6 +214,11 @@ func TestResetClearsAppliedFixes(t *testing.T) {
 	if snapshot := session.Snapshot(); len(snapshot.AppliedFixes) != 0 {
 		t.Fatalf("reset kept fixes: %v", snapshot.AppliedFixes)
 	}
+	// What the simulator broke is re-created, not left behind: after a reset
+	// the fault artifacts describe the current, broken environment.
+	if snapshot := session.Snapshot(); len(snapshot.FaultArtifacts) != 1 {
+		t.Fatalf("fault artifacts after reset = %v, want exactly the re-activated fault", snapshot.FaultArtifacts)
+	}
 	// A reset means "back to the incident": the declared fault must be active
 	// again, otherwise the participant gets a healthy environment and nothing
 	// left to diagnose.

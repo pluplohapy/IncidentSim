@@ -35,7 +35,11 @@ type Session struct {
 
 	HintsUsed    int                `json:"hints_used"`
 	AppliedFixes []runtime.EnvPatch `json:"applied_fixes"`
-	LastVerdict  string             `json:"last_verdict,omitempty"`
+	// FaultArtifacts is what an injector changed to activate the declared
+	// fault. It is kept apart from AppliedFixes because a postmortem must be
+	// able to tell what the simulator broke from what the participant did.
+	FaultArtifacts []runtime.EnvPatch `json:"fault_artifacts,omitempty"`
+	LastVerdict    string             `json:"last_verdict,omitempty"`
 }
 
 // Manager owns the live sessions of a core process.
@@ -105,16 +109,17 @@ func (s *Session) Snapshot() SessionView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	view := SessionView{
-		ID:           s.ID,
-		TaskID:       s.TaskID,
-		State:        s.State,
-		StartedAt:    s.StartedAt,
-		UpdatedAt:    s.UpdatedAt,
-		HintsUsed:    s.HintsUsed,
-		AppliedFixes: append([]runtime.EnvPatch(nil), s.AppliedFixes...),
-		LastVerdict:  s.LastVerdict,
-		Engine:       "",
-		Services:     nil,
+		ID:             s.ID,
+		TaskID:         s.TaskID,
+		State:          s.State,
+		StartedAt:      s.StartedAt,
+		UpdatedAt:      s.UpdatedAt,
+		HintsUsed:      s.HintsUsed,
+		AppliedFixes:   append([]runtime.EnvPatch(nil), s.AppliedFixes...),
+		FaultArtifacts: append([]runtime.EnvPatch(nil), s.FaultArtifacts...),
+		LastVerdict:    s.LastVerdict,
+		Engine:         "",
+		Services:       nil,
 	}
 	if s.instance != nil {
 		view.Engine = s.instance.Engine
@@ -134,7 +139,9 @@ type SessionView struct {
 	UpdatedAt    time.Time          `json:"updated_at"`
 	HintsUsed    int                `json:"hints_used"`
 	AppliedFixes []runtime.EnvPatch `json:"applied_fixes"`
-	LastVerdict  string             `json:"last_verdict,omitempty"`
-	Engine       string             `json:"engine"`
-	Services     []string           `json:"services,omitempty"`
+	// FaultArtifacts is what the simulator changed to create the incident.
+	FaultArtifacts []runtime.EnvPatch `json:"fault_artifacts,omitempty"`
+	LastVerdict    string             `json:"last_verdict,omitempty"`
+	Engine         string             `json:"engine"`
+	Services       []string           `json:"services,omitempty"`
 }

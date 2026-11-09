@@ -45,7 +45,7 @@ func New(config Config, catalog *Catalog, adapters map[string]runtime.Adapter, i
 		return nil, fmt.Errorf("engine %q has no adapter (have %v)", config.Engine, adapterNames(adapters))
 	}
 	if injectors == nil {
-		injectors = injector.NewRegistry()
+		injectors = injector.DefaultRegistry()
 	}
 	if grader == nil {
 		grader = verifier.NewManifestVerifier()
@@ -287,6 +287,7 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 	o.refreshInstance(session, instance)
 	session.mu.Lock()
 	session.AppliedFixes = nil
+	session.FaultArtifacts = nil
 	session.LastVerdict = ""
 	session.mu.Unlock()
 	session.journal.Record(EventReset, "environment restored to baseline", nil)

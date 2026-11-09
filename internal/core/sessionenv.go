@@ -25,6 +25,10 @@ func (e *sessionEnv) InstanceID() string { return e.session.ID }
 func (e *sessionEnv) Runtime() runtime.Adapter { return e.adapter }
 
 // SetEnv applies an environment patch and records it as a fault artifact.
+//
+// What an injector changed is deliberately not recorded as a participant fix:
+// a postmortem must be able to tell what the simulator broke apart from what
+// the participant did.
 func (e *sessionEnv) SetEnv(ctx context.Context, service string, vars map[string]string) error {
 	instance, err := e.adapter.Apply(ctx, e.session.ID, runtime.EnvPatch{
 		Service: service,
@@ -35,15 +39,13 @@ func (e *sessionEnv) SetEnv(ctx context.Context, service string, vars map[string
 		return err
 	}
 	e.session.mu.Lock()
+	defer e.session.mu.Unlock()
 	e.session.instance = instance
-	e.session.mu.Unlock()
-	e.session.mu.Lock()
-	e.session.AppliedFixes = append(e.session.AppliedFixes, runtime.EnvPatch{
+	e.session.FaultArtifacts = append(e.session.FaultArtifacts, runtime.EnvPatch{
 		Service: service,
 		Vars:    vars,
 		Restart: true,
 	})
-	e.session.mu.Unlock()
 	return nil
 }
 
