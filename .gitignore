@@ -1,0 +1,26 @@
+# Binaries and build artefacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Local state produced by incidentsim (sessions, journals, scratch dirs)
+/.incidentsim/
+/tmp/
+
+# Editor / IDE
+/.idea/
+/.vscode/
+.DS_Store
+
+# Firecracker guest artefacts
+/ansible/artifacts/
+*.kernel
+*.rootfs
+*.snapshot
+vcpu*.log
+firecracker.log
+
+# Logs
+*.log
