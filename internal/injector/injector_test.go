@@ -70,7 +70,7 @@ func TestStubInjectorNeverChangesEnvironment(t *testing.T) {
 }
 
 func TestFaultKindConstantsMatchSchema(t *testing.T) {
-	want := []string{KindFeatureFlag, KindSQLConfig, KindKill, KindNetwork, KindStress}
+	want := []string{KindFeatureFlag, KindKill, KindNetwork, KindSQLConfig, KindStress}
 	got := Kinds()
 	if len(got) != len(want) {
 		t.Fatalf("kinds = %v, want %v", got, want)
