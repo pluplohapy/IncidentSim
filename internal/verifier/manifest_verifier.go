@@ -21,11 +21,21 @@ import (
 type ManifestVerifier struct {
 	// HTTPTimeout bounds every http check.
 	HTTPTimeout time.Duration
+	// ReplayRunner replays load before the correctness checks run. It is a
+	// field so a test can substitute a runner with a controlled clock.
+	ReplayRunner *ReplayRunner
+	// ProjectDir is the repository root the profiles are relative to, so a
+	// manifest writes workloads/db-connection-leak.yaml exactly as the path
+	// looks on disk. A task whose profile cannot be loaded fails loudly.
+	ProjectDir string
 }
 
 // NewManifestVerifier returns the default grader with production timeouts.
 func NewManifestVerifier() *ManifestVerifier {
-	return &ManifestVerifier{HTTPTimeout: 15 * time.Second}
+	return &ManifestVerifier{
+		HTTPTimeout:  15 * time.Second,
+		ReplayRunner: &ReplayRunner{Now: time.Now},
+	}
 }
 
 // Verify implements Verifier.
@@ -35,10 +45,79 @@ func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionI
 		return report, fmt.Errorf("%w: no environment given", ErrProbeFailed)
 	}
 
+	// The observation window runs first: a gate that measures an idle system
+	// would let a task be "fixed" by stopping the service.
+	report.Replay = v.runReplay(ctx, env, checks)
 	report.Correctness.Results = v.runGate(ctx, env, checks.Correctness)
 	report.Quality.Results = v.runGate(ctx, env, checks.Quality)
 	report.Finalise()
 	return report, nil
+}
+
+// runReplay replays the declared load and returns a summary for the report.
+// A missing profile is a note, not a failure: a static task may have nothing to
+// replay, and the gates still run against the current state.
+//
+// The replay targets the service the correctness checks measure. Picking the
+// first service of the environment instead would replay against a database,
+// which speaks no HTTP and reports a thousand meaningless errors.
+func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, checks CheckSet) string {
+	config := checks.Replay
+	if config == nil || config.Duration == "" {
+		return ""
+	}
+	instance := env.Instance()
+	if instance == nil {
+		return "replay skipped: no environment"
+	}
+	requests, err := v.profileRequests(config)
+	if err != nil {
+		return fmt.Sprintf("replay skipped: %v", err)
+	}
+	target := replayTarget(instance, checks)
+	if target == "" {
+		return "replay skipped: no HTTP service in the environment"
+	}
+	result, err := v.ReplayRunner.Replay(ctx, target, requests, *config)
+	if err != nil {
+		return fmt.Sprintf("replay incomplete: %v", err)
+	}
+	return result.String()
+}
+
+// replayTarget resolves the endpoint the replay should load.
+func replayTarget(instance *runtime.Instance, checks CheckSet) string {
+	// A correctness check names the service that carries the incident, so it is
+	// the most honest source of the target.
+	for _, check := range checks.Correctness {
+		if check.Kind != CheckHTTP || check.Service == "" {
+			continue
+		}
+		if endpoint := endpointFor(instance, check.Service); endpoint != "" {
+			return endpoint
+		}
+	}
+	// Otherwise the first service reachable over HTTP, which excludes a
+	// database: a microVM behind vsock is reached through the guest agent.
+	for _, service := range instance.Services {
+		if strings.HasPrefix(service.Endpoint, "vsock://") || service.Endpoint == "" {
+			continue
+		}
+		return service.Endpoint
+	}
+	return ""
+}
+
+// profileRequests loads the requests a replay profile declares.
+func (v *ManifestVerifier) profileRequests(config *ReplayConfig) ([]Request, error) {
+	if config.Profile == "" {
+		return nil, fmt.Errorf("%w: the replay section declares no profile", ErrNoReplayProfile)
+	}
+	profile, err := LoadReplayProfile(v.ProjectDir, config.Profile)
+	if err != nil {
+		return nil, err
+	}
+	return profile.Requests, nil
 }
 
 // runGate executes every check of one gate and never stops early: a report
@@ -55,6 +134,14 @@ func (v *ManifestVerifier) runGate(ctx context.Context, env Environment, checks 
 func (v *ManifestVerifier) runCheck(ctx context.Context, env Environment, check Check) Result {
 	start := time.Now()
 	result := Result{Check: check}
+	if env == nil {
+		// A check without an environment cannot observe anything, and a pass
+		// here would be a false green.
+		result.Passed = false
+		result.Detail = "unable to probe the environment: no environment given"
+		result.Duration = time.Since(start).Round(time.Millisecond).String()
+		return result
+	}
 
 	switch check.Kind {
 	case CheckHTTP:

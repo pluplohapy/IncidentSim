@@ -1,0 +1,20 @@
+# Replay-профиль задачи db-connection-leak.
+#
+# Профиль описывает нагрузку, которую verifier отправляет в окне наблюдения:
+# без нагрузки задача решается простоем сервиса, и ни один шлюз не заметит
+# подмены.
+profile: db-connection-leak
+duration: 30s
+rps: 20
+concurrency: 8
+requests:
+  - name: list-orders
+    method: GET
+    path: /api/orders
+    weight: 5
+    expect_status: [200]
+  - name: healthz
+    method: GET
+    path: /healthz
+    weight: 1
+    expect_status: [200]
