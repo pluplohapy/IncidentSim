@@ -18,7 +18,7 @@ type StubVerifier struct {
 }
 
 // Verify implements Verifier.
-func (s *StubVerifier) Verify(ctx context.Context, sessionID, taskID string, checks CheckSet) (Report, error) {
+func (s *StubVerifier) Verify(ctx context.Context, env Environment, sessionID, taskID string, checks CheckSet) (Report, error) {
 	s.Called++
 	report := s.Report
 	report.SessionID = sessionID
@@ -37,8 +37,8 @@ type FakeEnvironment struct {
 	EnvValues map[string]map[string]string
 	// SQLRows maps service name to the rows SQL() returns.
 	SQLRows map[string][]map[string]string
-	// ReplayText is what Replay() returns.
-	ReplayText string
+	// Services is what Instance() returns, used by the replay runner.
+	Services []runtime.Service
 	// Err makes every accessor fail.
 	Err error
 }
@@ -49,9 +49,9 @@ func (f FakeEnvironment) InstanceID() string { return f.InstanceIDValue }
 // Runtime implements Environment.
 func (f FakeEnvironment) Runtime() runtime.Adapter { return f.Adapter }
 
-// Replay implements Environment.
-func (f FakeEnvironment) Replay(ctx context.Context) (string, error) {
-	return f.ReplayText, f.Err
+// Instance implements Environment.
+func (f FakeEnvironment) Instance() *runtime.Instance {
+	return &runtime.Instance{ID: f.InstanceIDValue, Services: f.Services}
 }
 
 // Env implements Environment.

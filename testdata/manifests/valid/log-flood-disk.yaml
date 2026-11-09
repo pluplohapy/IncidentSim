@@ -13,7 +13,6 @@ spec:
     - name: app
       image: incidentsim/workload:dev
       env:
-        LOG_LEVEL: debug
         LOG_FILE: /var/log/app/app.log
       ports: [8080]
       healthcheck:

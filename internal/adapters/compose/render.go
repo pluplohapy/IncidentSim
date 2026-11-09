@@ -14,20 +14,19 @@ const composeFile = "compose.yaml"
 
 // Project renders a runtime.Spec into a compose project document.
 //
-// Port mapping is deterministic: the first host port is 10000 + index, so two
-// sessions of the same task never collide on a developer machine. The core
-// learns the mapping back through `compose port`, which is what makes the
-// Service endpoints honest even if Docker chose a different host port.
+// Ports are published without a fixed host port: Docker assigns an ephemeral
+// one, so two sessions of the same task never collide on a developer machine
+// and a restarted session does not inherit a stale binding. The adapter then
+// asks `compose port` for the real mapping, which is what makes the endpoints
+// it reports honest.
 func Project(name string, spec runtime.Spec) string {
 	var b strings.Builder
 	b.WriteString("name: ")
 	b.WriteString(name)
 	b.WriteString("\nservices:\n")
 
-	hostPort := 20000
-	for i, service := range spec.Services {
-		hostPort = 20000 + i*100
-		writeService(&b, service, hostPort, spec.FaultEnv)
+	for _, service := range spec.Services {
+		writeService(&b, service, spec.FaultEnv)
 	}
 
 	b.WriteString("networks:\n  default:\n    name: ")
@@ -36,7 +35,7 @@ func Project(name string, spec runtime.Spec) string {
 	return b.String()
 }
 
-func writeService(b *strings.Builder, service runtime.ServiceSpec, hostPort int, faultEnv map[string]string) {
+func writeService(b *strings.Builder, service runtime.ServiceSpec, faultEnv map[string]string) {
 	b.WriteString("  ")
 	b.WriteString(service.Name)
 	b.WriteString(":\n")
@@ -66,7 +65,7 @@ func writeService(b *strings.Builder, service runtime.ServiceSpec, hostPort int,
 	if len(service.Ports) > 0 {
 		b.WriteString("    ports:\n")
 		for _, port := range service.Ports {
-			b.WriteString(fmt.Sprintf("      - \"%d:%d\"\n", hostPort, port))
+			b.WriteString(fmt.Sprintf("      - \"%d\"\n", port))
 		}
 	}
 

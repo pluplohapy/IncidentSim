@@ -152,11 +152,14 @@ type Adapter interface {
 
 	// Reset restores the baseline state of the environment. Firecracker
 	// restores the baseline snapshot; compose does a down/up. The session id
-	// stays valid after a reset.
-	Reset(ctx context.Context, sessionID string) error
+	// stays valid after a reset. It returns the refreshed instance because a
+	// reset can move published ports.
+	Reset(ctx context.Context, sessionID string) (*Instance, error)
 
-	// Apply pushes a configuration change into a running environment.
-	Apply(ctx context.Context, sessionID string, patch EnvPatch) error
+	// Apply pushes a configuration change into a running environment. It
+	// returns the refreshed instance for the same reason: recreating a
+	// service can change where it is reachable from.
+	Apply(ctx context.Context, sessionID string, patch EnvPatch) (*Instance, error)
 }
 
 // Spec is the manifest view an adapter needs to build an environment. It is a

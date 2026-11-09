@@ -65,13 +65,13 @@ spec:
         rule: env_flag_off
         query: POOL_LEAK
         reason: "Утечка — дефект кода, флаг должен быть выключен, а не спрятан ростом лимита"
-      - id: idle-connections-bounded
+      - id: max-connections-not-inflated
         type: sql
         service: db
-        sql: "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction'"
+        sql: "SHOW max_connections"
         expect:
-          max: 5
-        reason: "Копящиеся соединения — признак того, что причина осталась"
+          max: 200
+        reason: "Раздувание лимита соединений БД убирает симптом, оставляя утечку"
   root_cause:
     summary: "Приложение не возвращает соединения в пул: флаг POOL_LEAK=true включает утечку в коде."
     layer: code
@@ -93,7 +93,7 @@ spec:
       title: "Раздуть max_connections в БД, чтобы ошибки исчезли"
       symptom: errors-5xx
       masked_artifact: "потребление соединений на стороне БД"
-      fails: idle-connections-bounded
+      fails: max-connections-not-inflated
   replay:
     profile: workloads/db-connection-leak.yaml
     duration: 30s

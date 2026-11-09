@@ -102,20 +102,30 @@ func (f *FakeAdapter) Metrics(ctx context.Context, sessionID string, service str
 	return []MetricSample{{Service: service, Name: "app_errors_total", Value: 0, At: time.Now()}}, nil
 }
 
-func (f *FakeAdapter) Reset(ctx context.Context, sessionID string) error {
+func (f *FakeAdapter) Reset(ctx context.Context, sessionID string) (*Instance, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, "Reset")
 	f.applied = nil
-	return f.FailWith
+	if f.FailWith != nil {
+		return nil, f.FailWith
+	}
+	out := *f.Instance
+	out.Services = append([]Service(nil), f.Instance.Services...)
+	return &out, nil
 }
 
-func (f *FakeAdapter) Apply(ctx context.Context, sessionID string, patch EnvPatch) error {
+func (f *FakeAdapter) Apply(ctx context.Context, sessionID string, patch EnvPatch) (*Instance, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, "Apply:"+patch.Service)
 	f.applied = append(f.applied, patch)
-	return f.FailWith
+	if f.FailWith != nil {
+		return nil, f.FailWith
+	}
+	out := *f.Instance
+	out.Services = append([]Service(nil), f.Instance.Services...)
+	return &out, nil
 }
 
 // AppliedPatches returns the patches seen by Apply, oldest first.

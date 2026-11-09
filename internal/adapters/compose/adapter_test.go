@@ -35,8 +35,8 @@ func dockerAvailable(t *testing.T) bool {
 }
 
 func TestUpFailsLoudlyWithoutDocker(t *testing.T) {
-	if _, err := exec.LookPath("docker"); err == nil {
-		t.Skip("docker is installed on this machine")
+	if os.Getenv("INCIDENTSIM_TEST_DOCKER") == "1" {
+		t.Skip("docker integration is enabled in this run")
 	}
 	adapter := New(t.TempDir())
 	adapter.Docker = filepath.Join(t.TempDir(), "docker-does-not-exist")
@@ -47,6 +47,11 @@ func TestUpFailsLoudlyWithoutDocker(t *testing.T) {
 }
 
 func TestAdapterReportsUnknownSession(t *testing.T) {
+	if os.Getenv("INCIDENTSIM_TEST_DOCKER") != "1" {
+		// The fake-free parts of the adapter are covered by the render tests;
+		// the real engine behaviour is an integration concern.
+		t.Skip("set INCIDENTSIM_TEST_DOCKER=1 to talk to a real docker daemon")
+	}
 	adapter := New(t.TempDir())
 	ctx := context.Background()
 
@@ -59,7 +64,7 @@ func TestAdapterReportsUnknownSession(t *testing.T) {
 	if _, err := adapter.Metrics(ctx, "ghost", "app"); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("Metrics error = %v", err)
 	}
-	if err := adapter.Reset(ctx, "ghost"); !errors.Is(err, runtime.ErrNotFound) {
+	if _, err := adapter.Reset(ctx, "ghost"); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("Reset error = %v", err)
 	}
 	// Down of an unknown session is a no-op, not an error: reset and teardown
@@ -70,6 +75,9 @@ func TestAdapterReportsUnknownSession(t *testing.T) {
 }
 
 func TestApplyToUnknownServiceIsRejected(t *testing.T) {
+	if !dockerAvailable(t) {
+		return
+	}
 	adapter := New(t.TempDir())
 	ctx := context.Background()
 	_, err := adapter.Up(ctx, "session-1", testSpec())
@@ -78,13 +86,16 @@ func TestApplyToUnknownServiceIsRejected(t *testing.T) {
 	}
 	defer adapter.Down(ctx, "session-1")
 
-	err = adapter.Apply(ctx, "session-1", runtime.EnvPatch{Service: "cache", Vars: map[string]string{"X": "1"}})
+	_, err = adapter.Apply(ctx, "session-1", runtime.EnvPatch{Service: "cache", Vars: map[string]string{"X": "1"}})
 	if !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("Apply to unknown service = %v, want ErrNotFound", err)
 	}
 }
 
 func TestApplyRewritesComposeFileWithFix(t *testing.T) {
+	if !dockerAvailable(t) {
+		return
+	}
 	adapter := New(t.TempDir())
 	ctx := context.Background()
 	if _, err := adapter.Up(ctx, "session-1", testSpec()); err != nil {
@@ -92,7 +103,7 @@ func TestApplyRewritesComposeFileWithFix(t *testing.T) {
 	}
 	defer adapter.Down(ctx, "session-1")
 
-	if err := adapter.Apply(ctx, "session-1", runtime.EnvPatch{
+	if _, err := adapter.Apply(ctx, "session-1", runtime.EnvPatch{
 		Service: "app",
 		Vars:    map[string]string{"LOG_LEVEL": "info"},
 		Restart: true,
@@ -110,13 +121,81 @@ func TestApplyRewritesComposeFileWithFix(t *testing.T) {
 	}
 }
 
-func TestComposeLifecycleAgainstRealDocker(t *testing.T) {
+// TestComposeFullLifecycle runs a whole session against the local docker
+// daemon: up, metrics, apply a fix, reset, down. It is what proves the compose
+// fallback really works on a developer machine, so it is gated on the
+// environment variable rather than skipped silently.
+func TestComposeFullLifecycle(t *testing.T) {
 	if !dockerAvailable(t) {
 		return
 	}
-	// The task services come from images that must exist locally. Build them
-	// with `make workload-image` before enabling this test.
-	t.Skip("requires local images incidentsim/workload:dev and postgres:16-alpine")
+	adapter := New(t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	instance, err := adapter.Up(ctx, "integration-session", testSpec())
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	defer adapter.Down(context.Background(), "integration-session")
+
+	if len(instance.Services) != 2 {
+		t.Fatalf("services = %+v", instance.Services)
+	}
+	if instance.Services[0].Endpoint == "" {
+		t.Fatal("no resolved endpoint for db")
+	}
+
+	samples, err := adapter.Metrics(ctx, "integration-session", "")
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Fatal("no metrics scraped")
+	}
+
+	// A fix must change what the environment reports, not just the compose
+	// file: this is the assertion that caught `compose restart` ignoring env.
+	if _, err := adapter.Apply(ctx, "integration-session", runtime.EnvPatch{
+		Service: "app",
+		Vars:    map[string]string{"POOL_LEAK": "true"},
+		Restart: true,
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+	metrics, err := adapter.Metrics(ctx, "integration-session", "app")
+	if err != nil {
+		t.Fatalf("Metrics after fix: %v", err)
+	}
+	var poolInUse float64
+	found := false
+	for _, sample := range metrics {
+		if sample.Name == "app_db_pool_in_use" {
+			poolInUse = sample.Value
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("app_db_pool_in_use missing after the fix")
+	}
+	if poolInUse == 0 {
+		t.Fatal("the recreated service still reports an empty pool: the env patch did not reach it")
+	}
+
+	if _, err := adapter.Reset(ctx, "integration-session"); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	after, err := adapter.Metrics(ctx, "integration-session", "app")
+	if err != nil {
+		t.Fatalf("Metrics after reset: %v", err)
+	}
+	for _, sample := range after {
+		if sample.Name == "app_db_pool_in_use" && sample.Value == poolInUse {
+			t.Fatalf("reset did not restore the baseline pool size (still %v)", sample.Value)
+		}
+	}
 }
 
 func TestScrapeMetricsReadsPrometheusText(t *testing.T) {

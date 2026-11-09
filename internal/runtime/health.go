@@ -7,9 +7,14 @@ import (
 	"time"
 )
 
-// waitEndpoint polls one healthcheck endpoint until it answers or the poll
-// budget is exhausted. Both engines share it so that "Up returned" means the
-// same thing for compose and for Firecracker.
+// waitEndpoint polls one healthcheck endpoint until the service answers or the
+// poll budget is exhausted. Both engines share it so that "Up returned" means
+// the same thing for compose and for Firecracker.
+//
+// Any HTTP response counts, including a 5xx: an incident environment is meant
+// to come up degraded, and "the process answers" is what makes it usable for a
+// diagnosis. Whether the incident is actually fixed is the verifier's job,
+// not the adapter's.
 func waitEndpoint(ctx context.Context, service Service, check *HealthcheckSpec, budget time.Duration) error {
 	client := &http.Client{Timeout: time.Duration(check.TimeoutSeconds) * time.Second}
 	deadline := time.Now().Add(budget)
@@ -30,13 +35,9 @@ func waitEndpoint(ctx context.Context, service Service, check *HealthcheckSpec, 
 		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil
-			}
-			lastErr = fmt.Errorf("status %d", resp.StatusCode)
-		} else {
-			lastErr = err
+			return nil
 		}
+		lastErr = err
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -65,8 +65,12 @@ func (c *Client) Available(ctx context.Context) error {
 }
 
 // Up brings the project up detached.
+//
+// There is deliberately no --wait: a task environment is allowed to come up
+// degraded, which is the whole point of an incident simulator. Waiting for
+// healthy here would fail every task whose fault is visible at boot.
 func (c *Client) Up(ctx context.Context) error {
-	_, err := c.run(ctx, "compose", "up", "--detach", "--wait", "--remove-orphans")
+	_, err := c.run(ctx, "compose", "up", "--detach", "--remove-orphans")
 	return err
 }
 
@@ -88,9 +92,16 @@ func (c *Client) Start(ctx context.Context) error {
 	return err
 }
 
-// Restart restarts one service.
+// Restart applies a configuration change to one service.
+//
+// It recreates the container instead of restarting the process: `compose
+// restart` keeps the old container definition, so an environment patch would
+// be silently ignored and a participant's fix would appear to do nothing.
+// There is deliberately no --wait: a service in an incident is unhealthy, and
+// waiting for healthy here would block the session on the very fault the
+// participant is asked to diagnose.
 func (c *Client) Restart(ctx context.Context, service string) error {
-	_, err := c.run(ctx, "compose", "restart", service)
+	_, err := c.run(ctx, "compose", "up", "--detach", "--no-deps", "--force-recreate", "--no-build", service)
 	return err
 }
 
@@ -103,9 +114,29 @@ func (c *Client) PSNames(ctx context.Context) ([]string, error) {
 	return nonEmptyLines(out.stdout), nil
 }
 
+// ContainerID returns the id of the container currently backing a service.
+// Reading the port from the container id rather than from the service name is
+// deliberate: during a recreate `compose port` can still answer with the
+// mapping of the container being replaced.
+func (c *Client) ContainerID(ctx context.Context, service string) (string, error) {
+	out, err := c.run(ctx, "compose", "ps", "--quiet", service)
+	if err != nil {
+		return "", err
+	}
+	lines := nonEmptyLines(out.stdout)
+	if len(lines) == 0 {
+		return "", fmt.Errorf("no running container for service %s", service)
+	}
+	return lines[0], nil
+}
+
 // Port returns the host port a container port is published on.
 func (c *Client) Port(ctx context.Context, service string, containerPort int) (string, error) {
-	out, err := c.run(ctx, "compose", "port", service, fmt.Sprint(containerPort))
+	containerID, err := c.ContainerID(ctx, service)
+	if err != nil {
+		return "", err
+	}
+	out, err := c.docker(ctx, "port", containerID, fmt.Sprint(containerPort))
 	if err != nil {
 		return "", err
 	}
@@ -132,6 +163,18 @@ func (c *Client) Logs(ctx context.Context, service string, tail int) (commandOut
 	return c.run(ctx, args...)
 }
 
+// RunningServices returns the names of the services of the project that are
+// currently running. It is how Up detects a service that starts and
+// immediately exits, which --wait cannot catch for a service without a
+// healthcheck.
+func (c *Client) RunningServices(ctx context.Context) ([]string, error) {
+	out, err := c.run(ctx, "compose", "ps", "--services", "--status", "running")
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyLines(out.stdout), nil
+}
+
 // InspectEnvironment returns the environment of a running service, which is how
 // a policy check sees the participant's fix.
 func (c *Client) InspectEnvironment(ctx context.Context, service string) (map[string]string, error) {
@@ -145,6 +188,26 @@ func (c *Client) InspectEnvironment(ctx context.Context, service string) (map[st
 type commandOutput struct {
 	stdout string
 	stderr string
+}
+
+// docker runs a plain docker command with the project context, so the
+// container-scoped commands resolve against the same project.
+func (c *Client) docker(ctx context.Context, args ...string) (commandOutput, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cmd := exec.CommandContext(ctx, c.Docker, args...)
+	cmd.Dir = c.ProjectDir
+	cmd.Env = append(os.Environ(), c.Env...)
+	cmd.Env = append(cmd.Env, "COMPOSE_PROJECT_NAME="+c.ProjectName)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return commandOutput{stdout: stdout.String(), stderr: stderr.String()},
+			fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, firstLine(stderr.String()))
+	}
+	return commandOutput{stdout: stdout.String(), stderr: stderr.String()}, nil
 }
 
 func (c *Client) run(ctx context.Context, args ...string) (commandOutput, error) {

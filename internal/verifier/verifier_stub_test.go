@@ -69,7 +69,7 @@ func TestGateResultFailedResults(t *testing.T) {
 
 func TestStubVerifierStampsSessionAndTask(t *testing.T) {
 	stub := StubVerifier{Report: NewReport("", "")}
-	report, err := stub.Verify(context.Background(), "session-1", "task-1", CheckSet{})
+	report, err := stub.Verify(context.Background(), FakeEnvironment{}, "session-1", "task-1", CheckSet{})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -95,7 +95,6 @@ func TestFakeEnvironmentSatisfiesContract(t *testing.T) {
 		InstanceIDValue: "session-42",
 		EnvValues:       map[string]map[string]string{"app": {"LOG_LEVEL": "info"}},
 		SQLRows:         map[string][]map[string]string{"db": {{"count": "0"}}},
-		ReplayText:      "replay: 20 rps, 0 errors",
 	}
 	if env.InstanceID() != "session-42" {
 		t.Errorf("InstanceID = %s", env.InstanceID())
@@ -107,10 +106,6 @@ func TestFakeEnvironmentSatisfiesContract(t *testing.T) {
 	rows, err := env.SQL(context.Background(), "db", "select 1")
 	if err != nil || len(rows) != 1 {
 		t.Errorf("SQL = %v, %v", rows, err)
-	}
-	text, err := env.Replay(context.Background())
-	if err != nil || text != "replay: 20 rps, 0 errors" {
-		t.Errorf("Replay = %q, %v", text, err)
 	}
 }
 

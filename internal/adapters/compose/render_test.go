@@ -43,8 +43,8 @@ func TestProjectRendersServicesWithFaultEnvWinning(t *testing.T) {
 		"image: incidentsim/workload:dev",
 		"restart: unless-stopped",
 		"healthcheck:",
-		"20000:5432",
-		"20100:8080",
+		`- "5432"`,
+		`- "8080"`,
 	} {
 		if !strings.Contains(document, want) {
 			t.Fatalf("compose document missing %q:\n%s", want, document)
@@ -69,15 +69,15 @@ func TestProjectQuotesNumericEnvValues(t *testing.T) {
 	}
 }
 
-func TestProjectKeepsPortMappingPerService(t *testing.T) {
+func TestProjectPublishesContainerPortsOnly(t *testing.T) {
 	document := Project("incidentsim-test", testSpec())
-	// A port published on the same host port twice would make two sessions of
-	// one task collide on a developer machine.
-	if strings.Count(document, "20000:5432") != 1 {
-		t.Fatalf("unexpected port mapping:\n%s", document)
+	// Fixed host ports would make two sessions of one task collide on a
+	// developer machine, so the rendering must publish container ports only.
+	if strings.Contains(document, ":5432") && strings.Contains(document, "5432:") {
+		t.Fatalf("compose document still maps a host port:\n%s", document)
 	}
-	if strings.Count(document, "20100:8080") != 1 {
-		t.Fatalf("unexpected port mapping:\n%s", document)
+	if strings.Count(document, `- "5432"`) != 1 || strings.Count(document, `- "8080"`) != 1 {
+		t.Fatalf("unexpected port rendering:\n%s", document)
 	}
 }
 
