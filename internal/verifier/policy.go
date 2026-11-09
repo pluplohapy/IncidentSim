@@ -3,29 +3,40 @@ package verifier
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 )
 
-// Policy rules. A rule is a named production expectation; a manifest check
-// references it by name so the check itself stays declarative.
+// Policy rules of the quality gate.
+//
+// A rule is a named production expectation, referenced by name from a manifest
+// check. Keeping the rules here, next to the checks, is what lets a task author
+// express "this fix is production appropriate" without writing Go.
 const (
 	// RuleEnvFlagOff requires an environment flag to be unset or empty.
 	RuleEnvFlagOff = "env_flag_off"
 	// RuleEnvFlagEquals requires an environment variable to hold a value.
 	RuleEnvFlagEquals = "env_flag_equals"
+	// RuleServiceNotStopped requires the service process to be running: a
+	// stopped service trivially "works" for no one.
+	RuleServiceNotStopped = "service_not_stopped"
+	// RuleLogOutputPreserved requires the log file of a service to exist and
+	// to be non-empty: deleting the log is the classic distractor.
+	RuleLogOutputPreserved = "log_output_preserved"
+	// RuleLoggingNotDisabled requires the log stream of a service to exist.
+	RuleLoggingNotDisabled = "logging_not_disabled"
 )
 
 // checkPolicy runs a policy check by looking its rule up in the registry.
 //
-// Policy checks are the difference between "the system answers" and "the fix
-// belongs in production", so an unknown rule must fail the run rather than
-// pass silently: a typo in a rule name would otherwise disable the quality
-// gate for that check.
+// An unknown rule must fail the run rather than pass silently: a typo in a rule
+// name would otherwise disable the quality gate for that check, which is the
+// one failure mode that would make the whole simulator lie.
 func (v *ManifestVerifier) checkPolicy(ctx context.Context, env Environment, check Check) Result {
 	result := Result{Check: check}
 	rule, ok := PolicyRules[check.Rule]
 	if !ok {
-		return fail(result, fmt.Sprintf("unknown policy rule %q", check.Rule))
+		return fail(result, fmt.Sprintf("unknown policy rule %q (have %s)", check.Rule, ruleNames()))
 	}
 	vars, err := env.Env(ctx, check.Service)
 	if err != nil {
@@ -33,7 +44,7 @@ func (v *ManifestVerifier) checkPolicy(ctx context.Context, env Environment, che
 	}
 	result.Evidence = fmt.Sprintf("%s=%q", check.Query, vars[check.Query])
 
-	if err := rule(check, vars); err != nil {
+	if err := rule(ctx, env, check, vars); err != nil {
 		return fail(result, err.Error())
 	}
 	result.Passed = true
@@ -42,15 +53,15 @@ func (v *ManifestVerifier) checkPolicy(ctx context.Context, env Environment, che
 }
 
 // PolicyRules maps rule names to their evaluation.
-var PolicyRules = map[string]func(check Check, vars map[string]string) error{
-	RuleEnvFlagOff: func(check Check, vars map[string]string) error {
+var PolicyRules = map[string]func(ctx context.Context, env Environment, check Check, vars map[string]string) error{
+	RuleEnvFlagOff: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
 		value, present := vars[check.Query]
 		if !present || strings.TrimSpace(value) == "" || isOff(value) {
 			return nil
 		}
 		return fmt.Errorf("%s is still %q, expected the flag to be off", check.Query, value)
 	},
-	RuleEnvFlagEquals: func(check Check, vars map[string]string) error {
+	RuleEnvFlagEquals: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
 		value, present := vars[check.Query]
 		want := ""
 		if check.Expect != nil && check.Expect.Equals != nil {
@@ -64,6 +75,38 @@ var PolicyRules = map[string]func(check Check, vars map[string]string) error{
 		}
 		return nil
 	},
+	RuleServiceNotStopped: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
+		// The service declares itself stopped only if it stopped answering at
+		// all, which a health endpoint reports; here the rule reads the env of
+		// the process that is supposed to serve it.
+		if len(vars) == 0 {
+			return fmt.Errorf("service %q has no environment: it is not running", check.Service)
+		}
+		return nil
+	},
+	RuleLogOutputPreserved: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
+		path := vars[check.Query]
+		if path == "" {
+			return fmt.Errorf("%s is not set: the service does not know where it logs", check.Query)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("log file %s is gone: %v", path, err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("log file %s is empty: the history was destroyed", path)
+		}
+		return nil
+	},
+}
+
+// ruleNames lists the registered rules for an unknown-rule error message.
+func ruleNames() []string {
+	out := make([]string, 0, len(PolicyRules))
+	for name := range PolicyRules {
+		out = append(out, name)
+	}
+	return out
 }
 
 // isOff reports whether a flag value means "disabled".
