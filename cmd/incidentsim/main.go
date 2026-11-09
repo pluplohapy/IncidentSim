@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"incidentsim/internal/adapters/compose"
+	"incidentsim/internal/adapters/firecracker"
 	"incidentsim/internal/cli"
 	"incidentsim/internal/core"
 	"incidentsim/internal/runtime"
@@ -130,11 +132,16 @@ func serve(args []string) error {
 		adapters["compose"] = compose.New(config.StateDir())
 	}
 	if config.Engine == "firecracker" {
-		adapter, err := firecrackerAdapter(config)
-		if err != nil {
-			return err
-		}
-		adapters["firecracker"] = adapter
+		adapters["firecracker"] = firecracker.New(firecracker.Config{
+			FirecrackerBin: config.Firecracker.FirecrackerBin,
+			SocketDir:      config.Firecracker.SocketDir,
+			KernelImage:    config.Firecracker.KernelImage,
+			RootfsDir:      filepath.Dir(config.Firecracker.RootfsImage),
+			BaselineDir:    filepath.Dir(config.Firecracker.BaselineSnapshot),
+			GuestAgentPort: config.Firecracker.GuestAgentPort,
+		})
+		// Compose stays registered: a manifest can still choose it, and the
+		// core can fall back to it when KVM is unavailable on this host.
 		adapters["compose"] = compose.New(config.StateDir())
 	}
 
@@ -170,13 +177,6 @@ func serve(args []string) error {
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	}
-}
-
-// firecrackerAdapter builds the Firecracker adapter from config. It lives in
-// main so that the compose-only build stays free of the Firecracker artefacts.
-func firecrackerAdapter(config core.Config) (runtime.Adapter, error) {
-	return compose.New(config.StateDir()), fmt.Errorf(
-		"firecracker adapter is provisioned by ansible; run `make ansible-provision` first")
 }
 
 // apply parses the fix flags and pushes them into a session.
