@@ -18,6 +18,7 @@ import (
 	"incidentsim/internal/adapters/firecracker"
 	"incidentsim/internal/cli"
 	"incidentsim/internal/core"
+	"incidentsim/internal/injector"
 	"incidentsim/internal/runtime"
 	"incidentsim/internal/verifier"
 	"incidentsim/internal/version"
@@ -145,7 +146,7 @@ func serve(args []string) error {
 		adapters["compose"] = compose.New(config.StateDir())
 	}
 
-	orchestrator, err := core.New(config, catalog, adapters, nil, verifier.NewManifestVerifier())
+	orchestrator, err := core.New(config, catalog, adapters, injector.DefaultRegistry(), verifier.NewManifestVerifier())
 	if err != nil {
 		return err
 	}
