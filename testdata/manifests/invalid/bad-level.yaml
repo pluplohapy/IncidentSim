@@ -1,0 +1,13 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: bad-level
+  title: "Неизвестный уровень задачи"
+  level: expert
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      ports: [8080]

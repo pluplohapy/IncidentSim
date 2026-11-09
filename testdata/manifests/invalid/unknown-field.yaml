@@ -1,0 +1,14 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: unknown-field
+  title: "Неизвестное поле должно ломать валидацию"
+  level: config
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      ports: [8080]
+      端口: 8080

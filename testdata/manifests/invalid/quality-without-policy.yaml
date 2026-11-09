@@ -1,0 +1,39 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: quality-without-policy
+  title: "Quality gate без политик не отличает фикс от маскировки"
+  level: config
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      ports: [8080]
+  fault:
+    type: feature_flag
+    target: app
+    options:
+      env:
+        LOG_LEVEL: debug
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: disk-freed
+        type: metric
+        service: app
+        query: app_disk_used_pct
+        expect:
+          max: 90
+  root_cause:
+    summary: "Корневая причина не важна для этого негативного случая."
+    layer: config
+  reference_solution:
+    summary: "Эталонное решение не важно для негативного случая."

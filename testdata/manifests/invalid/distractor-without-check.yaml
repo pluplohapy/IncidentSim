@@ -1,0 +1,51 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: distractor-without-check
+  title: "Дистрактор ссылается на несуществующую проверку"
+  level: config
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      ports: [8080]
+  symptoms:
+    - id: disk-full
+      observation: "Метрика app_disk_used_pct приблизилась к 100"
+  fault:
+    type: feature_flag
+    target: app
+    options:
+      env:
+        LOG_LEVEL: debug
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: log-level-info
+        type: policy
+        service: app
+        rule: env_flag_equals
+        query: LOG_LEVEL
+        expect:
+          equals: info
+        reason: "debug-логи в проде запрещены политикой"
+  root_cause:
+    summary: "Корневая причина не важна для этого негативного случая."
+    layer: config
+    masked_by: [delete-log-file]
+  reference_solution:
+    summary: "Эталонное решение не важно для негативного случая."
+  distractors:
+    - id: delete-log-file
+      title: "Удалить файл лога"
+      symptom: disk-full
+      masked_artifact: "история логов"
+      fails: log-level-preserved

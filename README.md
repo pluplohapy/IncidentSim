@@ -95,7 +95,7 @@ docs/                      диаграммы, demo, инструкции
 ## 4. Схема манифеста (фиксированная, не DSL)
 
 Полное описание полей — [`skills/manifest-authoring/SKILL.md`](skills/manifest-authoring/SKILL.md)
-и [`manifests/schema.json`](manifests/schema.json). Каркас:
+и [`internal/manifest/schema.json`](internal/manifest/schema.json). Каркас:
 
 ```yaml
 apiVersion: incidentsim/v1

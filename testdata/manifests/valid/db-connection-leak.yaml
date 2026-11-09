@@ -1,0 +1,100 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: db-connection-leak
+  title: "Пул соединений к БД исчерпан"
+  level: code
+  tags: [postgres, go, connection-pool]
+  estimated_minutes: 30
+spec:
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      ports: [5432]
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  symptoms:
+    - id: errors-5xx
+      observation: "GET /api/orders отвечает 503, в логах app видны connection pool exhausted"
+  hints:
+    - level: 1
+      text: "Сравните метрики app_db_pool_in_use и app_db_pool_max"
+  fault:
+    type: feature_flag
+    target: app
+    options:
+      env:
+        POOL_LEAK: "true"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: errors-bounded
+        type: metric
+        service: app
+        query: app_errors_total
+        duration: 30s
+        expect:
+          max: 5
+    quality:
+      - id: leak-flag-off
+        type: policy
+        service: app
+        rule: env_flag_off
+        query: POOL_LEAK
+        reason: "Утечка — дефект кода, флаг должен быть выключен, а не спрятан ростом лимита"
+      - id: idle-connections-bounded
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction'"
+        expect:
+          max: 5
+        reason: "Копящиеся соединения — признак того, что причина осталась"
+  root_cause:
+    summary: "Приложение не возвращает соединения в пул: флаг POOL_LEAK=true включает утечку в коде."
+    layer: code
+    signals:
+      - "app_db_pool_in_race == app_db_pool_max"
+      - "pg_stat_activity: много idle in transaction"
+    masked_by: [raise-max-connections]
+  reference_solution:
+    summary: "Выключить POOL_LEAK и перезапустить app, затем убедиться что in_use упал."
+    steps:
+      - "Найти флаг в env сервиса app"
+      - "Выставить POOL_LEAK=false и перезапустить"
+      - "Повторить verify"
+    commands:
+      - "incidentsim apply --service app --set POOL_LEAK=false"
+    rollback: "Вернуть POOL_LEAK=true, если нагрузка упадёт ещё сильнее"
+  distractors:
+    - id: raise-max-connections
+      title: "Раздуть max_connections в БД, чтобы ошибки исчезли"
+      symptom: errors-5xx
+      masked_artifact: "потребление соединений на стороне БД"
+      fails: idle-connections-bounded
+  replay:
+    profile: workloads/db-connection-leak.yaml
+    duration: 30s
+    rps: 20

@@ -1,0 +1,41 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: unknown-fault-target
+  title: "Сбой указывает на несуществующий сервис"
+  level: config
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      ports: [8080]
+  fault:
+    type: feature_flag
+    target: cache
+    options:
+      env:
+        LOG_LEVEL: debug
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: log-level-info
+        type: policy
+        service: app
+        rule: env_flag_equals
+        query: LOG_LEVEL
+        expect:
+          equals: info
+        reason: "debug-логи в проде запрещены политикой"
+  root_cause:
+    summary: "Корневая причина не важна для этого негативного случая."
+    layer: config
+  reference_solution:
+    summary: "Эталонное решение не важно для негативного случая."

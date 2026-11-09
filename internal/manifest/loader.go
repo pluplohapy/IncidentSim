@@ -1,0 +1,491 @@
+package manifest
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Loader reads manifests from a catalog directory.
+type Loader struct {
+	// Dir is the catalog root, e.g. "manifests".
+	Dir string
+}
+
+// NewLoader returns a loader rooted at dir.
+func NewLoader(dir string) *Loader { return &Loader{Dir: dir} }
+
+// Load reads, parses and validates one manifest file.
+func Load(path string) (*Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	m, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.Validate(); err != nil {
+		var verr *ValidationError
+		if errors.As(err, &verr) {
+			verr.File = path
+		}
+		return nil, err
+	}
+	if err := checkStem(path, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// LoadReader is Load for streams; used by tests and by the API when a manifest
+// is uploaded for validation.
+func LoadReader(r io.Reader) (*Manifest, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	return parseAndValidate(data)
+}
+
+// Parse unmarshals YAML into the typed manifest, applying defaults. It does not
+// validate; call Manifest.Validate for that.
+func Parse(data []byte) (*Manifest, error) {
+	m := &Manifest{raw: data}
+	if err := yaml.Unmarshal(data, m); err != nil {
+		return nil, fmt.Errorf("parse YAML: %w", err)
+	}
+	m.applyDefaults()
+	return m, nil
+}
+
+// parseAndValidate is the shared entry point of Load and LoadReader.
+func parseAndValidate(data []byte) (*Manifest, error) {
+	m, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// LoadDir loads every manifest of a catalog directory, sorted by task id.
+// A single broken manifest fails the whole call: a catalog with one invalid
+// task is broken, and silently dropping tasks hides that from the operator.
+func (l *Loader) LoadDir() ([]*Manifest, error) {
+	entries, err := os.ReadDir(l.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("read catalog: %w", err)
+	}
+	out := make([]*Manifest, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !isManifestFile(entry.Name()) {
+			continue
+		}
+		m, err := Load(filepath.Join(l.Dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("catalog %s contains no manifests", l.Dir)
+	}
+	return out, nil
+}
+
+// LoadTask loads a single task by id from the catalog directory.
+func (l *Loader) LoadTask(id string) (*Manifest, error) {
+	if err := validateID(id); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(l.Dir, id+".yaml")
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("task %q not found in catalog: %w", id, err)
+	}
+	return Load(path)
+}
+
+func isManifestFile(name string) bool {
+	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+}
+
+// Validate runs the semantic checks that the JSON Schema cannot express:
+// cross references between manifest sections.
+func (m *Manifest) Validate() error {
+	document := m.raw
+	if len(document) == 0 {
+		document = mustMarshalYAML(m)
+	}
+	issues := validateAgainstSchema("", document)
+
+	issues = append(issues, m.validateStructure()...)
+	issues = append(issues, m.validateFaults()...)
+	issues = append(issues, m.validateChecks()...)
+	issues = append(issues, m.validateDistractors()...)
+
+	issues = sortedIssues(issues)
+	if len(issues) == 0 {
+		return nil
+	}
+	return &ValidationError{Issues: issues}
+}
+
+func (m *Manifest) validateStructure() []Issue {
+	var issues []Issue
+	if m.APIVersion != APIVersion {
+		issues = append(issues, Issue{Field: "apiVersion", Message: fmt.Sprintf("must be %q", APIVersion)})
+	}
+	if m.Kind != Kind {
+		issues = append(issues, Issue{Field: "kind", Message: fmt.Sprintf("must be %q", Kind)})
+	}
+	if err := validateID(m.Metadata.ID); err != nil {
+		issues = append(issues, Issue{Field: "metadata.id", Message: err.Error()})
+	}
+	if m.Metadata.Title == "" {
+		issues = append(issues, Issue{Field: "metadata.title", Message: "must not be empty"})
+	}
+	switch m.Metadata.Level {
+	case LevelConfig, LevelCode, LevelDB, LevelComposite:
+	default:
+		issues = append(issues, Issue{Field: "metadata.level", Message: fmt.Sprintf("must be one of config, code, db, composite")})
+	}
+	switch m.Spec.Runtime.Engine {
+	case "compose", "firecracker", "":
+	default:
+		issues = append(issues, Issue{Field: "spec.runtime.engine", Message: "must be compose or firecracker"})
+	}
+	return issues
+}
+
+func (m *Manifest) validateFaults() []Issue {
+	var issues []Issue
+	services := m.serviceNames()
+
+	if m.Spec.Fault != nil {
+		issues = append(issues, validateFault("spec.fault", *m.Spec.Fault, services)...)
+	}
+	if len(m.Spec.FaultChain) > 0 {
+		if m.Metadata.Level != LevelComposite {
+			issues = append(issues, Issue{
+				Field:   "spec.fault_chain",
+				Message: "fault_chain requires metadata.level = composite",
+			})
+		}
+		seen := map[string]bool{}
+		for i, fault := range m.Spec.FaultChain {
+			field := fmt.Sprintf("spec.fault_chain[%d]", i)
+			issues = append(issues, validateFault(field, fault, services)...)
+			if seen[fault.Type] {
+				issues = append(issues, Issue{Field: field, Message: fmt.Sprintf("duplicate fault type %q in chain", fault.Type)})
+			}
+			seen[fault.Type] = true
+		}
+	}
+	if m.Spec.Fault == nil && len(m.Spec.FaultChain) == 0 {
+		issues = append(issues, Issue{Field: "spec", Message: "either fault or fault_chain must be set"})
+	}
+	return issues
+}
+
+func validateFault(field string, fault FaultSpec, services []string) []Issue {
+	var issues []Issue
+	switch fault.Type {
+	case FaultFeatureFlag, FaultSQLConfig, FaultKill, FaultNetwork, FaultStress:
+	default:
+		issues = append(issues, Issue{Field: field + ".type", Message: "unknown fault type"})
+	}
+	if !contains(services, fault.Target) {
+		issues = append(issues, Issue{
+			Field:   field + ".target",
+			Message: fmt.Sprintf("must reference a declared service, got %q (have %s)", fault.Target, strings.Join(services, ", ")),
+		})
+	}
+	switch fault.Trigger {
+	case "", TriggerOnStart, TriggerManual, "after_30s":
+	default:
+		issues = append(issues, Issue{Field: field + ".trigger", Message: "must be on_start, after_30s or manual"})
+	}
+	return issues
+}
+
+func (m *Manifest) validateChecks() []Issue {
+	var issues []Issue
+	services := m.serviceNames()
+
+	for gate, checks := range map[string][]Check{
+		GateCorrectness: m.Spec.Verify.Correctness,
+		GateQuality:     m.Spec.Verify.Quality,
+	} {
+		field := "spec.verify." + gate
+		if len(checks) == 0 {
+			issues = append(issues, Issue{Field: field, Message: "at least one check is required"})
+			continue
+		}
+		seen := map[string]bool{}
+		hasPolicy := false
+		for i, check := range checks {
+			checkField := fmt.Sprintf("%s[%d]", field, i)
+			if err := validateID(check.ID); err != nil {
+				issues = append(issues, Issue{Field: checkField + ".id", Message: err.Error()})
+			}
+			if seen[check.ID] {
+				issues = append(issues, Issue{Field: checkField + ".id", Message: "duplicate check id"})
+			}
+			seen[check.ID] = true
+			if check.Type == CheckPolicy {
+				hasPolicy = true
+			}
+			issues = append(issues, validateCheck(checkField, check, services, gate)...)
+		}
+		if gate == GateQuality && !hasPolicy {
+			issues = append(issues, Issue{
+				Field:   field,
+				Message: "quality gate must contain at least one policy check: it is what catches symptom masking",
+			})
+		}
+	}
+	return issues
+}
+
+func validateCheck(field string, check Check, services []string, gate string) []Issue {
+	var issues []Issue
+	switch check.Type {
+	case CheckHTTP:
+		if check.Path == "" {
+			issues = append(issues, Issue{Field: field, Message: "http check requires path"})
+		}
+		if check.Expect == nil || check.Expect.Status == nil {
+			issues = append(issues, Issue{Field: field + ".expect", Message: "http check requires expect.status"})
+		}
+	case CheckMetric:
+		if check.Query == "" {
+			issues = append(issues, Issue{Field: field, Message: "metric check requires query"})
+		}
+		if check.Expect == nil || (check.Expect.Min == nil && check.Expect.Max == nil) {
+			issues = append(issues, Issue{Field: field + ".expect", Message: "metric check requires expect.min or expect.max"})
+		}
+	case CheckSQL:
+		if check.SQL == "" {
+			issues = append(issues, Issue{Field: field, Message: "sql check requires sql"})
+		}
+		if !contains(services, check.Service) {
+			issues = append(issues, Issue{Field: field + ".service", Message: "must reference a declared service"})
+		}
+	case CheckLog:
+		if check.Pattern == "" {
+			issues = append(issues, Issue{Field: field, Message: "log check requires pattern"})
+		}
+	case CheckPolicy:
+		if check.Rule == "" {
+			issues = append(issues, Issue{Field: field, Message: "policy check requires rule"})
+		}
+		if check.Reason == "" {
+			issues = append(issues, Issue{Field: field + ".reason", Message: "policy check requires a reason: it must say why this is production relevant"})
+		}
+	case CheckExec:
+		if len(check.Command) == 0 {
+			issues = append(issues, Issue{Field: field, Message: "exec check requires command"})
+		}
+	default:
+		issues = append(issues, Issue{Field: field + ".type", Message: "unknown check type"})
+	}
+	if gate == GateQuality && check.Reason == "" && check.Type != CheckPolicy {
+		issues = append(issues, Issue{
+			Field:   field + ".reason",
+			Message: "quality checks must document why they guard production behaviour",
+		})
+	}
+	return issues
+}
+
+func (m *Manifest) validateDistractors() []Issue {
+	var issues []Issue
+	qualityIDs := map[string]bool{}
+	for _, check := range m.Spec.Verify.Quality {
+		qualityIDs[check.ID] = true
+	}
+	symptomIDs := map[string]bool{}
+	for _, symptom := range m.Spec.Symptoms {
+		symptomIDs[symptom.ID] = true
+	}
+
+	if len(m.Spec.Distractors) > 0 && len(symptomIDs) == 0 {
+		return []Issue{{
+			Field:   "spec.distractors",
+			Message: "distractors require spec.symptoms: a distractor hides a declared symptom",
+		}}
+	}
+
+	for i, distractor := range m.Spec.Distractors {
+		field := fmt.Sprintf("spec.distractors[%d]", i)
+		if !qualityIDs[distractor.Fails] {
+			issues = append(issues, Issue{
+				Field:   field + ".fails",
+				Message: fmt.Sprintf("must reference a quality check id (have %s)", joinKeys(qualityIDs)),
+			})
+		}
+		if len(symptomIDs) > 0 && !symptomIDs[distractor.Symptom] {
+			issues = append(issues, Issue{
+				Field:   field + ".symptom",
+				Message: fmt.Sprintf("must reference a symptom id (have %s)", joinKeys(symptomIDs)),
+			})
+		}
+	}
+	for _, id := range m.Spec.RootCause.MaskedBy {
+		found := false
+		for _, distractor := range m.Spec.Distractors {
+			if distractor.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			issues = append(issues, Issue{
+				Field:   "spec.root_cause.masked_by",
+				Message: fmt.Sprintf("references unknown distractor %q", id),
+			})
+		}
+	}
+	return issues
+}
+
+// ValidateWithAssets additionally checks that files referenced by the manifest
+// exist next to the catalog, so a task never starts with a missing replay
+// profile.
+func (m *Manifest) ValidateWithAssets(catalogDir string) error {
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	var issues []Issue
+	if m.Spec.Replay != nil && m.Spec.Replay.Profile != "" {
+		profile := filepath.Join(catalogDir, m.Spec.Replay.Profile)
+		if _, err := os.Stat(profile); err != nil {
+			issues = append(issues, Issue{
+				Field:   "spec.replay.profile",
+				Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Replay.Profile),
+			})
+		}
+	}
+	if len(issues) > 0 {
+		return &ValidationError{Issues: issues}
+	}
+	return nil
+}
+
+func (m *Manifest) applyDefaults() {
+	if m.Metadata.Level == "" {
+		m.Metadata.Level = LevelConfig
+	}
+	if m.Spec.Runtime.Engine == "" {
+		m.Spec.Runtime.Engine = "compose"
+	}
+	if m.Spec.Runtime.Snapshot == "" {
+		m.Spec.Runtime.Snapshot = "baseline"
+	}
+	if m.Spec.Fault != nil && m.Spec.Fault.Trigger == "" {
+		m.Spec.Fault.Trigger = TriggerOnStart
+	}
+	for i := range m.Spec.FaultChain {
+		if m.Spec.FaultChain[i].Trigger == "" {
+			m.Spec.FaultChain[i].Trigger = TriggerOnStart
+		}
+	}
+	for i := range m.Spec.Verify.Correctness {
+		if m.Spec.Verify.Correctness[i].Method == "" {
+			m.Spec.Verify.Correctness[i].Method = "GET"
+		}
+	}
+	for i := range m.Spec.Verify.Quality {
+		if m.Spec.Verify.Quality[i].Method == "" {
+			m.Spec.Verify.Quality[i].Method = "GET"
+		}
+	}
+}
+
+func (m *Manifest) serviceNames() []string {
+	names := make([]string, 0, len(m.Spec.Services))
+	for _, service := range m.Spec.Services {
+		names = append(names, service.Name)
+	}
+	return names
+}
+
+// Service returns the declared service by name.
+func (m *Manifest) Service(name string) (ServiceSpec, bool) {
+	for _, service := range m.Spec.Services {
+		if service.Name == name {
+			return service, true
+		}
+	}
+	return ServiceSpec{}, false
+}
+
+// checkStem keeps the catalog tidy: the file name must match the task id.
+func checkStem(path string, m *Manifest) error {
+	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if stem == m.Metadata.ID {
+		return nil
+	}
+	return &ValidationError{
+		File: path,
+		Issues: []Issue{{
+			Field:   "metadata.id",
+			Message: fmt.Sprintf("file name %q must match the task id %q", stem, m.Metadata.ID),
+		}},
+	}
+}
+
+func validateID(id string) error {
+	if id == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	for _, part := range strings.Split(id, "-") {
+		if part == "" {
+			return fmt.Errorf("%q must be kebab-case without empty segments", id)
+		}
+		for _, r := range part {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+				return fmt.Errorf("%q must be lower-case kebab-case", id)
+			}
+		}
+	}
+	return nil
+}
+
+func contains(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func joinKeys(set map[string]bool) string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return "none"
+	}
+	return strings.Join(keys, ", ")
+}
+
+// mustMarshalYAML round trips the typed manifest into YAML bytes for the schema
+// check. It only fails on programming errors, hence the panic-free fallback.
+func mustMarshalYAML(m *Manifest) []byte {
+	data, err := yaml.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return data
+}
