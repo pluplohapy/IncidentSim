@@ -1,0 +1,32 @@
+[Unit]
+Description=IncidentSim task microVM %i
+After=incidentsim-network.service
+Requires=incidentsim-network.service
+
+[Service]
+# One microVM per unit instance (%i is the session id). Firecracker is jailed:
+# it runs as the simulator user, with its own cgroup and no access to the host
+# filesystem beyond the artefacts the unit names.
+Type=simple
+User={{ incidentsim_user }}
+Group={{ incidentsim_user }}
+ExecStart=/usr/local/bin/firecracker \
+    --api-sock {{ incidentsim_vm_dir }}/%i.sock \
+    --id %i \
+    --seccomp-filter /usr/local/share/firecracker/seccomp.json
+ExecStopPost=/bin/sh -c 'echo "vm %i stopped" >> {{ incidentsim_state_dir }}/vms.log'
+Restart=no
+# A VM that exits is a session that ended; the core decides what to do.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Hardening: the unit only needs /dev/kvm and the artefact directories.
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths={{ incidentsim_vm_dir }} {{ incidentsim_snapshot_dir }}
+DeviceAllow=/dev/kvm rw
+
+[Install]
+WantedBy=multi-user.target
