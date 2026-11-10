@@ -50,6 +50,8 @@ func run(args []string) error {
 			flagValue(args[1:], "--service", ""), requiredFlagValue(args[1:], "--sql", "a --sql statement"))
 	case "metrics":
 		return client(args[1:]).Metrics(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""))
+	case "env":
+		return client(args[1:]).Env(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""))
 	case "logs":
 		return client(args[1:]).Logs(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""), flagValue(args[1:], "--grep", ""), intValue(flagValue(args[1:], "--tail", "200"), 200))
 	case "hint":
@@ -91,6 +93,7 @@ func usage() {
   incidentsim show [task]                           список задач или одна задача
   incidentsim start <task>                          поднять окружение и активировать сбой
   incidentsim metrics <session> [--service app]     последние метрики сервиса
+  incidentsim env <session> [--service app]          окружение сервиса (диагностика)
   incidentsim logs <session> [--service app] [-grep текст] [--tail N]
   incidentsim hint <session> [--level N]            подсказка по задаче
   incidentsim apply <session> --service app --set KEY=VALUE [--no-restart]

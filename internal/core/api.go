@@ -146,6 +146,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleMetrics(w, r, session)
 	case "logs":
 		s.handleLogs(w, r, session)
+	case "env":
+		s.handleEnv(w, r, session)
 	case "hint":
 		s.handleHint(w, r, session)
 	case "apply":
@@ -177,6 +179,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request, session *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"metrics": samples})
+}
+
+// handleEnv reports the effective environment of a service: the diagnostic
+// view a participant needs before applying a fix.
+func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	service := r.URL.Query().Get("service")
+	env, err := s.Orchestrator.Env(r.Context(), session.ID, service)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"service": service, "env": env})
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request, session *Session) {

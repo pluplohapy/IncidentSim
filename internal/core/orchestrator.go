@@ -385,6 +385,23 @@ func (o *Orchestrator) ExecSQL(ctx context.Context, sessionID, service, statemen
 	return result, nil
 }
 
+// Env returns the effective environment of a service of a session.
+//
+// It is how a participant diagnoses a config-level incident: the fault is a
+// variable, and the variable is visible through the same adapter path the
+// policy checks use.
+func (o *Orchestrator) Env(ctx context.Context, sessionID, service string) (map[string]string, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	adapter, err := o.adapterFor(session)
+	if err != nil {
+		return nil, err
+	}
+	return (&verifyEnv{session: session, adapter: adapter}).Env(ctx, service)
+}
+
 // Logs returns the filtered logs of a service of a session.
 func (o *Orchestrator) Logs(ctx context.Context, sessionID, service string, opts runtime.LogOptions) ([]runtime.LogLine, error) {
 	session, err := o.Sessions.Get(sessionID)

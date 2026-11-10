@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -172,6 +173,27 @@ func (c *Client) Start(ctx context.Context, taskID string) (string, error) {
 	}
 	fmt.Fprintf(c.Out, "смотрите метрики: incidentsim metrics --session %s\n", session.ID)
 	return session.ID, nil
+}
+
+// Env prints the effective environment of a service, which is how a
+// participant finds a config-level root cause.
+func (c *Client) Env(ctx context.Context, sessionID, service string) error {
+	var response struct {
+		Service string            `json:"service"`
+		Env     map[string]string `json:"env"`
+	}
+	if err := c.Get(ctx, "/api/v1/sessions/"+sessionID+"/env?service="+service, &response); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(response.Env))
+	for key := range response.Env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(c.Out, "%s=%s\n", key, response.Env[key])
+	}
+	return nil
 }
 
 // Metrics prints the latest metrics of a session.
