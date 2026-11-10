@@ -37,13 +37,25 @@ type config struct {
 	PoolMax   int
 	// SlowQueryLimit is the latency above which the order query is degraded.
 	SlowQueryLimit time.Duration
+	// CacheEnabled models a cache in front of the database.
+	CacheEnabled bool
+	// RetryEnabled, RetryAttempts and RetryBackoff model the retry policy.
+	RetryEnabled  bool
+	RetryAttempts int
+	RetryBackoff  time.Duration
 }
 
 func loadConfig() config {
 	slowLimit := envFloat("SLOW_QUERY_MS", 250)
+	retryAttempts := envInt("RETRY_ATTEMPTS", 3)
+	retryBackoffMs := envInt("RETRY_BACKOFF_MS", 50)
 	return config{
 		Port:           envInt("PORT", 8080),
 		SlowQueryLimit: time.Duration(slowLimit) * time.Millisecond,
+		CacheEnabled:   envBool("CACHE_ENABLED", true),
+		RetryEnabled:   envBool("RETRY_ENABLED", true),
+		RetryAttempts:  retryAttempts,
+		RetryBackoff:   time.Duration(retryBackoffMs) * time.Millisecond,
 		DBHost:         env("DB_HOST", "127.0.0.1"),
 		DBPort:         env("DB_PORT", "5432"),
 		DBName:         env("DB_NAME", "orders"),
@@ -111,7 +123,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", service.health(cfg))
 	mux.HandleFunc("/api/orders", service.orders(cfg))
-	mux.HandleFunc("/metrics", service.metrics)
+	mux.HandleFunc("/metrics", service.metrics(cfg))
 	mux.HandleFunc("/debug/reset", service.resetCounters)
 	// /debug/clear-logs models the distractor: it frees the disk by removing
 	// the log volume without fixing what produced it. The system answers
@@ -193,44 +205,93 @@ func (s *state) orders(cfg config) http.HandlerFunc {
 			fmt.Fprintln(w, `{"error":"connection pool exhausted"}`)
 			return
 		}
+
+		// The request walks a retry policy. An aggressive one (many attempts,
+		// no backoff) is what turns a slow dependency into a storm: the same
+		// request hits the database many times over and the latency multiplies.
+		attempts := 1
+		if cfg.RetryEnabled {
+			attempts = cfg.RetryAttempts
+			if attempts < 1 {
+				attempts = 1
+			}
+		}
+		latency := requestLatency(cfg) * time.Duration(attempts)
+		if cfg.RetryEnabled && cfg.RetryBackoff <= 0 && attempts > 5 {
+			// A retry storm exhausts the environment: the request fails rather
+			// than answering, which is the visible symptom of the incident.
+			s.mu.Lock()
+			s.errors++
+			s.mu.Unlock()
+			s.logf(cfg.LogLevel, "info", "retry storm: %d attempts without backoff, request failed", attempts)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintln(w, `{"error":"upstream overloaded by retries"}`)
+			return
+		}
+		time.Sleep(latency)
+
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"orders":[{"id":1,"total":100},{"id":2,"total":250}]}`)
 	}
 }
 
-func (s *state) metrics(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fmt.Fprintf(w, "# HELP app_errors_total requests that failed\n")
-	fmt.Fprintf(w, "# TYPE app_errors_total counter\n")
-	fmt.Fprintf(w, "app_errors_total %d\n", s.errors)
-	fmt.Fprintf(w, "# HELP app_requests_total requests served\n")
-	fmt.Fprintf(w, "# TYPE app_requests_total counter\n")
-	fmt.Fprintf(w, "app_requests_total %d\n", s.requests)
-	fmt.Fprintf(w, "# HELP app_db_pool_in_use connections currently held\n")
-	fmt.Fprintf(w, "# TYPE app_db_pool_in_use gauge\n")
-	fmt.Fprintf(w, "app_db_pool_in_use %d\n", s.poolInUse)
-	fmt.Fprintf(w, "# HELP app_db_pool_max pool capacity\n")
-	fmt.Fprintf(w, "# TYPE app_db_pool_max gauge\n")
-	fmt.Fprintf(w, "app_db_pool_max %d\n", 20)
-	fmt.Fprintf(w, "# HELP app_disk_used_pct simulated disk usage\n")
-	fmt.Fprintf(w, "# TYPE app_disk_used_pct gauge\n")
-	fmt.Fprintf(w, "app_disk_used_pct %.1f\n", s.diskPct)
-	fmt.Fprintf(w, "# HELP app_log_bytes bytes written by the logger\n")
-	fmt.Fprintf(w, "# TYPE app_log_bytes counter\n")
-	fmt.Fprintf(w, "app_log_bytes %d\n", s.logVolumeB)
-	fmt.Fprintf(w, "# HELP app_db_reachable whether the database answered\n")
-	fmt.Fprintf(w, "# TYPE app_db_reachable gauge\n")
-	fmt.Fprintf(w, "app_db_reachable %d\n", boolToInt(s.dbReachable))
-	fmt.Fprintf(w, "# HELP app_db_query_latency_p95_ms measured order-query latency\n")
-	fmt.Fprintf(w, "# TYPE app_db_query_latency_p95_ms gauge\n")
-	fmt.Fprintf(w, "app_db_query_latency_p95_ms %d\n", s.dbLatencyP95.Milliseconds())
-	fmt.Fprintf(w, "# HELP app_db_dead_tuples dead tuples the table statistics report\n")
-	fmt.Fprintf(w, "# TYPE app_db_dead_tuples gauge\n")
-	fmt.Fprintf(w, "app_db_dead_tuples %d\n", s.dbDeadTuples)
-	fmt.Fprintf(w, "# HELP app_db_rows rows in the orders table\n")
-	fmt.Fprintf(w, "# TYPE app_db_rows gauge\n")
-	fmt.Fprintf(w, "app_db_rows %d\n", s.dbRows)
+// requestLatency is the latency of one order lookup. Without a cache every
+// lookup goes to the database, which is where the avalanche starts.
+func requestLatency(cfg config) time.Duration {
+	if cfg.CacheEnabled {
+		return 5 * time.Millisecond
+	}
+	// A cache miss is cheaper than a real database miss would be, but the
+	// multiply by the retry count is what makes the incident visible.
+	return 25 * time.Millisecond
+}
+
+func (s *state) metrics(cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fmt.Fprintf(w, "# HELP app_errors_total requests that failed\n")
+		fmt.Fprintf(w, "# TYPE app_errors_total counter\n")
+		fmt.Fprintf(w, "app_errors_total %d\n", s.errors)
+		fmt.Fprintf(w, "# HELP app_requests_total requests served\n")
+		fmt.Fprintf(w, "# TYPE app_requests_total counter\n")
+		fmt.Fprintf(w, "app_requests_total %d\n", s.requests)
+		fmt.Fprintf(w, "# HELP app_db_pool_in_use connections currently held\n")
+		fmt.Fprintf(w, "# TYPE app_db_pool_in_use gauge\n")
+		fmt.Fprintf(w, "app_db_pool_in_use %d\n", s.poolInUse)
+		fmt.Fprintf(w, "# HELP app_db_pool_max pool capacity\n")
+		fmt.Fprintf(w, "# TYPE app_db_pool_max gauge\n")
+		fmt.Fprintf(w, "app_db_pool_max %d\n", 20)
+		fmt.Fprintf(w, "# HELP app_disk_used_pct simulated disk usage\n")
+		fmt.Fprintf(w, "# TYPE app_disk_used_pct gauge\n")
+		fmt.Fprintf(w, "app_disk_used_pct %.1f\n", s.diskPct)
+		fmt.Fprintf(w, "# HELP app_log_bytes bytes written by the logger\n")
+		fmt.Fprintf(w, "# TYPE app_log_bytes counter\n")
+		fmt.Fprintf(w, "app_log_bytes %d\n", s.logVolumeB)
+		fmt.Fprintf(w, "# HELP app_db_reachable whether the database answered\n")
+		fmt.Fprintf(w, "# TYPE app_db_reachable gauge\n")
+		fmt.Fprintf(w, "app_db_reachable %d\n", boolToInt(s.dbReachable))
+		fmt.Fprintf(w, "# HELP app_db_query_latency_p95_ms measured order-query latency\n")
+		fmt.Fprintf(w, "# TYPE app_db_query_latency_p95_ms gauge\n")
+		fmt.Fprintf(w, "app_db_query_latency_p95_ms %d\n", s.dbLatencyP95.Milliseconds())
+		fmt.Fprintf(w, "# HELP app_db_dead_tuples dead tuples the table statistics report\n")
+		fmt.Fprintf(w, "# TYPE app_db_dead_tuples gauge\n")
+		fmt.Fprintf(w, "app_db_dead_tuples %d\n", s.dbDeadTuples)
+		fmt.Fprintf(w, "# HELP app_db_rows rows in the orders table\n")
+		fmt.Fprintf(w, "# TYPE app_db_rows gauge\n")
+		fmt.Fprintf(w, "app_db_rows %d\n", s.dbRows)
+		fmt.Fprintf(w, "# HELP app_retry_requests requests answered after retries\n")
+		fmt.Fprintf(w, "# TYPE app_retry_requests counter\n")
+		fmt.Fprintf(w, "app_retry_requests %d\n", s.requests)
+		fmt.Fprintf(w, "# HELP app_cache_hits_total requests answered from cache\n")
+		fmt.Fprintf(w, "# TYPE app_cache_hits_total counter\n")
+		fmt.Fprintf(w, "app_cache_hits_total %d\n", func() int {
+			if cfg.CacheEnabled {
+				return int(s.requests)
+			}
+			return 0
+		}())
+	}
 }
 
 func boolToInt(value bool) int {
@@ -333,8 +394,15 @@ func probeDatabase(cfg config) dbObservation {
 	rows, err := runPSQL(cfg, "SELECT count(*) FROM orders")
 	latency := time.Since(start)
 	if err != nil {
-		log.Printf("database probe failed: %v", err)
-		return dbObservation{}
+		// "Relation does not exist" is a database that answered. Only a
+		// connection failure means the database is unreachable, and reporting
+		// a SQL error as unreachable would make every task without the table
+		// look like an outage.
+		if _, probeErr := runPSQL(cfg, "SELECT 1"); probeErr != nil {
+			log.Printf("database probe failed: %v", probeErr)
+			return dbObservation{}
+		}
+		return dbObservation{reachable: true}
 	}
 	dead, err := runPSQL(cfg, "SELECT coalesce(sum(n_dead_tup),0) FROM pg_stat_user_tables WHERE relname = 'orders'")
 	if err != nil {
