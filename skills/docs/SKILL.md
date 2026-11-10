@@ -1,0 +1,66 @@
+---
+name: docs
+description: Как писать README, Mermaid-диаграммы и примеры манифестов для IncidentSim.
+---
+
+# SKILL: docs
+
+Спецификация — [`README.md`](../README.md). Этот скилл про то, как документ
+остаётся правдой после того, как код ушёл вперёд.
+
+## Структура
+
+| Документ | Что в нём | Чего в нём нет |
+|----------|-----------|----------------|
+| [`README.md`](../README.md) | спецификация: архитектура, этапы, критерии MVP | команд, которые нужно угадывать |
+| [`docs/local-macos.md`](../docs/local-macos.md) | локальный путь на Apple Silicon | путей Firecracker |
+| [`docs/runbook.md`](../docs/runbook.md) | bare-metal с KVM | локальных обходных путей |
+| [`docs/architecture.md`](../docs/architecture.md) | Mermaid-диаграммы | кода |
+| [`docs/adding-a-task.md`](../docs/adding-a-task.md) | как добавить манифест | теории из манифестов |
+| [`docs/teleport-audit.md`](../docs/teleport-audit.md) | опциональный аудит | обещаний записи потока |
+
+Правило: **один факт — в одном документе.** Остальные ссылаются.
+
+## Mermaid
+
+* используй `flowchart`, `sequenceDiagram` — рендерится везде;
+* не вкладывай длинный текст в узлы: узел — имя, детали — в таблице рядом;
+* диаграмма обязана что-то объяснять, что текст объясняет хуже: последовательность
+  активации сбоя, два шлюза, связь ядра и движков;
+* проверяй рендер: GitHub рисует mermaid в ```mermaid-блоках.
+
+## README
+
+README — источник правды для внешнего взгляда. Обновляй его в той же ветке, что
+и код:
+
+* новая задача → строка в каталоге и критериях MVP;
+* новый движок → строка в таблице этапов и в матрице ограничений;
+* новое правило схемы → абзац в [`skills/manifest-authoring/SKILL.md`](../skills/manifest-authoring/SKILL.md),
+  а не копия схемы в README.
+
+## Примеры манифестов
+
+* пример в README и в `docs/adding-a-task.md` должен **проходить
+  `incidentsim validate`** — скопируй из [`manifests/log-flood-disk.yaml`](../manifests/log-flood-disk.yaml);
+* не сокращай пример до невалидного: разработчик копирует его и получает ошибку;
+* любой пример ссылается на файл, из которого взят, чтобы копия не разошлась
+  с оригиналом.
+
+## Чек-лист
+
+- [ ] каждая команда в README существует в `cmd/incidentsim/main.go`;
+- [ ] каждый путь из README существует в файловой системе;
+- [ ] диаграммы объясняют то, что текст объясняет хуже;
+- [ ] пример манифеста проходит `./bin/incidentsim validate`;
+- [ ] ограничения named (нет KVM, нет nested virt), а не «может не работать».
+
+## Как проверить скилл
+
+```console
+$ ./bin/incidentsim validate          # все примеры каталога валидны
+$ ./scripts/demo.sh                   # команды из README действительно работают
+```
+
+Связанные: [spec-first](spec-first/SKILL.md), [firecracker-ansible](firecracker-ansible/SKILL.md),
+[manifest-authoring](manifest-authoring/SKILL.md).

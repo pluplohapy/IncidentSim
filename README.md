@@ -121,9 +121,16 @@ spec:
   theory: "..."
 ```
 
-Задачи в каталоге: `log-flood-disk` (config-level), `db-connection-leak`
-(code-level), `pg-table-bloat` (db-level), `cache-avalanche-retry-storm`
-(composite, fault chain + distractors).
+Задачи в каталоге:
+
+| id | Уровень | Что сломано | Чем ловится маскировка |
+|----|---------|-------------|------------------------|
+| `log-flood-disk` | config | debug-логи без ротации | policy на `LOG_LEVEL=info`: удаление лога проходит correctness и падает на quality |
+| `db-connection-leak` | code | утечка соединений в пуле | policy на флаг утечки + SQL на нераздутый `max_connections` |
+| `pg-table-bloat` | db | мёртвые кортежи, autovacuum отключён | SQL: данные на месте и autovacuum включён |
+| `cache-avalanche-retry-storm` | composite | кэш выключен, ретраи без backoff | policy: ретраи **ограничены**, а не выключены |
+
+Подробности задачи — [`docs/adding-a-task.md`](docs/adding-a-task.md).
 
 ---
 
@@ -147,6 +154,7 @@ spec:
 | `feat/content-mvp`      | три задачи: log-flood-disk, db-connection-leak, pg-table-bloat          |
 | `feat/content-fault-chain` | `cache-avalanche-retry-storm`, chain-aware проверки                 |
 | `feat/postmortem`       | генератор черновика постмортема из event log                            |
+| `feat/teleport-audit`   | адаптер аудита сессий (опционально)                                     |
 | `feat/teleport-audit`   | адаптер аудита сессий (опционально)                                     |
 | `feat/docs-demo`        | диаграммы, инструкция запуска, демо-скрипт                              |
 
@@ -190,6 +198,15 @@ $ bin/incidentsim start db-connection-leak
 $ bin/incidentsim metrics
 $ bin/incidentsim verify
 $ bin/incidentsim postmortem
+$ ./scripts/demo.sh log-flood-disk     # интерактивное демо обеих проверок
 ```
 
-Подробности запуска — [`docs/runbook.md`](docs/runbook.md).
+Подробности запуска:
+
+* на macOS (Apple Silicon) — [`docs/local-macos.md`](docs/local-macos.md): Colima +
+  Docker Compose, одна команда `./scripts/demo.sh`;
+* на bare-metal Linux с KVM — [`docs/runbook.md`](docs/runbook.md): провижининг
+  Ansible и движок Firecracker.
+
+Firecracker на macOS недоступен: `/dev/kvm` — часть ядра Linux, вложенной
+виртуализации на Apple Silicon нет. Это ограничение платформы, а не настройка.
