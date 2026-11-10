@@ -345,7 +345,10 @@ func (s *state) floodLogs(cfg config) {
 		}
 		s.mu.Unlock()
 		s.logf(cfg.LogLevel, "debug", "request payload id=%d user=%s detail=%s", 1, "system", repeat("x", 256))
-		time.Sleep(10 * time.Millisecond)
+		// The flood grows at a pace an incident actually grows at: fast enough
+		// to reach the limit within a session, slow enough that a participant
+		// has time to observe it and to test a hypothesis.
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

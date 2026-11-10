@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -155,6 +156,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleVerify(w, r, session)
 	case "reset":
 		s.handleReset(w, r, session)
+	case "postmortem":
+		s.handlePostmortem(w, r, session)
 	case "stop":
 		s.handleStop(w, r, session)
 	default:
@@ -293,6 +296,26 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request, session *Se
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
+}
+
+// handlePostmortem returns the generated draft of a session report.
+func (s *Server) handlePostmortem(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	postmortem, err := s.Orchestrator.GeneratePostmortem(session.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "")
+		return
+	}
+	if format := r.URL.Query().Get("format"); format == "md" || format == "markdown" {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, postmortem.Render())
+		return
+	}
+	writeJSON(w, http.StatusOK, postmortem)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request, session *Session) {

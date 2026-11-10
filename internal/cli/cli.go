@@ -316,6 +316,58 @@ func truncate(text string, limit int) string {
 	return text[:limit] + "…"
 }
 
+// Postmortem prints the generated draft of a session report.
+func (c *Client) Postmortem(ctx context.Context, sessionID string, markdown bool) error {
+	path := "/api/v1/sessions/" + sessionID + "/postmortem"
+	if markdown {
+		path += "?format=md"
+	}
+	if markdown {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return fmt.Errorf("cannot reach the core at %s: %w (run `incidentsim serve` first)", c.BaseURL, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode >= 400 {
+			return &ErrAPI{Status: resp.StatusCode, Message: strings.TrimSpace(string(body))}
+		}
+		fmt.Fprintln(c.Out, string(body))
+		return nil
+	}
+	var postmortem struct {
+		SessionID  string `json:"session_id"`
+		Verdict    string `json:"verdict"`
+		Duration   string `json:"duration"`
+		HintsUsed  int    `json:"hints_used"`
+		PartialFix bool   `json:"partial_fix"`
+		Note       string `json:"partial_fix_note"`
+		Timeline   []struct {
+			At      time.Time `json:"at"`
+			Type    string    `json:"type"`
+			Message string    `json:"message"`
+		} `json:"timeline"`
+	}
+	if err := c.Get(ctx, path, &postmortem); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.Out, "postmortem for %s (%s, %d hints)\n", postmortem.SessionID, postmortem.Duration, postmortem.HintsUsed)
+	for _, entry := range postmortem.Timeline {
+		fmt.Fprintf(c.Out, "  %s %-18s %s\n", entry.At.Format("15:04:05"), entry.Type, entry.Message)
+	}
+	if postmortem.PartialFix {
+		fmt.Fprintf(c.Out, "\nЧАСТИЧНЫЙ ФИКС: %s\n", postmortem.Note)
+	}
+	return nil
+}
+
 // Reset restores the baseline environment of a session.
 func (c *Client) Reset(ctx context.Context, sessionID string) error {
 	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/reset", nil, nil); err != nil {

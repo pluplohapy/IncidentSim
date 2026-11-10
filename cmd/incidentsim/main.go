@@ -60,6 +60,8 @@ func run(args []string) error {
 		return client(args[1:]).Verify(context.Background(), requiredArg(args[1:], "session id"))
 	case "reset":
 		return client(args[1:]).Reset(context.Background(), requiredArg(args[1:], "session id"))
+	case "postmortem":
+		return client(args[1:]).Postmortem(context.Background(), requiredArg(args[1:], "session id"), hasFlag(args[1:], "--md"))
 	case "stop":
 		return client(args[1:]).Stop(context.Background(), requiredArg(args[1:], "session id"))
 	case "sessions":
