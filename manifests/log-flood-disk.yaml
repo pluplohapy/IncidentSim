@@ -39,6 +39,12 @@ spec:
         expect:
           status: 200
     quality:
+      - id: log-history-preserved
+        type: policy
+        service: app
+        rule: log_output_preserved
+        query: LOG_FILE
+        reason: "История логов нужна для разбора: удаление файла — не fix, а сокрытие следов"
       - id: log-level-info
         type: policy
         service: app
@@ -71,7 +77,7 @@ spec:
       title: "Удалить файл лога, чтобы освободить диск"
       symptom: disk-full
       masked_artifact: "история логов, нужная для разбора"
-      fails: log-level-info
+      fails: log-history-preserved
   replay:
     profile: workloads/log-flood-disk.yaml
     duration: 30s

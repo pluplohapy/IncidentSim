@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,6 +81,10 @@ type state struct {
 	startedAt  time.Time
 	logVolumeB int
 
+	// logFile and logWriter persist the declared log path on disk.
+	logFile   string
+	logWriter *os.File
+	logMu     sync.Mutex
 	// dbReachable reports whether the last database probe succeeded.
 	dbReachable bool
 	// dbLatencyP95 is the measured latency of the order query.
@@ -101,7 +106,7 @@ func main() {
 	cfg := loadConfig()
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	service := &state{startedAt: time.Now().UTC(), diskPct: 10}
+	service := &state{startedAt: time.Now().UTC(), diskPct: 10, logFile: cfg.LogFile}
 	service.logf(cfg.LogLevel, "info", "workload starting (level=%s pool_leak=%v pool_max=%d)", cfg.LogLevel, cfg.PoolLeak, cfg.PoolMax)
 
 	// The debug flood is the log-flood-disk fault: at debug level the service
@@ -445,11 +450,44 @@ func atoiSafe(text string) int {
 
 // logf emits a log line, honouring the configured level. At info level the
 // debug lines disappear, which is the observable effect of the fix.
+//
+// A declared LOG_FILE is written as well as stdout, so the environment has a
+// real file a participant can look at: "where are the logs" is the first
+// question of a disk incident, and answering it with "nowhere" would make the
+// task unreadable.
 func (s *state) logf(level, want, format string, args ...any) {
 	if levelOrder(level) < levelOrder(want) {
 		return
 	}
-	log.Printf(format, args...)
+	line := fmt.Sprintf(format, args...)
+	log.Print(line)
+	s.appendToFile(line)
+}
+
+// appendToFile appends one line to the configured log file.
+func (s *state) appendToFile(line string) {
+	if s.logFile == "" {
+		return
+	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logWriter == nil {
+		if err := os.MkdirAll(filepath.Dir(s.logFile), 0o755); err != nil {
+			log.Printf("create log dir: %v", err)
+			s.logFile = ""
+			return
+		}
+		file, err := os.OpenFile(s.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			log.Printf("open log file: %v", err)
+			s.logFile = ""
+			return
+		}
+		s.logWriter = file
+	}
+	if _, err := fmt.Fprintln(s.logWriter, time.Now().UTC().Format(time.RFC3339), line); err != nil {
+		log.Printf("append log file: %v", err)
+	}
 }
 
 func levelOrder(level string) int {
