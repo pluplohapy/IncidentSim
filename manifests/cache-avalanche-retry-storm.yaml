@@ -1,0 +1,158 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: cache-avalanche-retry-storm
+  title: "Avalanche: кэш отключён, ретраи раздули нагрузку"
+  level: composite
+  tags: [composite, cache, retry, postgres]
+  estimated_minutes: 45
+spec:
+  runtime:
+    engine: compose
+    memory_mib: 2048
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      ports: [5432]
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        CACHE_ENABLED: "true"
+        RETRY_ENABLED: "true"
+        RETRY_ATTEMPTS: "3"
+        RETRY_BACKOFF_MS: "50"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 3
+  symptoms:
+    - id: errors-5xx
+      observation: "GET /api/orders отвечает 503, метрика app_errors_total растёт"
+    - id: latency-climb
+      observation: "app_db_query_latency_p95_ms выше нормы, app_requests_total растёт быстрее пользовательского трафика"
+  hints:
+    - level: 1
+      text: "Посмотрите env сервиса app: что изменилось в политике ретраев и в кэше?"
+    - level: 2
+      text: "Сравните app_requests_total с реальным трафиком: ретраи множат каждый запрос"
+    - level: 3
+      text: "Петля усиливается ретраями без backoff: ограничьте backoff, а не убирайте ретраи"
+  fault_chain:
+    - type: feature_flag
+      target: app
+      trigger: on_start
+      breaks_loop: false
+      options:
+        env:
+          CACHE_ENABLED: "false"
+    - type: feature_flag
+      target: app
+      trigger: after_30s
+      breaks_loop: true
+      options:
+        env:
+          RETRY_ENABLED: "true"
+          RETRY_ATTEMPTS: "20"
+          RETRY_BACKOFF_MS: "0"
+    - type: sql_config
+      target: db
+      trigger: on_start
+      breaks_loop: false
+      options:
+        statements:
+          - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+          - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 1000) g"
+          - "ALTER ROLE postgres CONNECTION LIMIT 10"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: errors-bounded
+        type: metric
+        service: app
+        query: app_errors_total
+        duration: 30s
+        expect:
+          max: 5
+        reason: "Сервис должен отвечать под нагрузкой, а не только в покое"
+    quality:
+      - id: cache-back-on
+        type: policy
+        service: app
+        rule: env_flag_equals
+        query: CACHE_ENABLED
+        expect:
+          equals: "true"
+        reason: "Avalanche начинается с отключённого кэша: пока он выключен, каждый запрос идёт в БД"
+      - id: retry-loop-bounded
+        type: policy
+        service: app
+        rule: retry_loop_bounded
+        query: RETRY_BACKOFF_MS
+        expect:
+          min: 20
+        reason: "Петля усиливается ретраями без backoff: именно этот линк chain должен быть ограничен, иначе storm вернётся"
+      - id: connection-limit-restored
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM pg_roles WHERE rolname = 'postgres' AND (rolconnlimit < 0 OR rolconnlimit >= 100)"
+        expect:
+          min: 1
+        reason: "Урезанный лимит соединений прячет нагрузку под повышенными ошибками, оставляя причину"
+  root_cause:
+    summary: "Отключённый кэш увеличил долю запросов к БД, а ретраи без backoff и с 20 попытками размножили каждый запрос: нагрузка на БД выросла на порядок, пул соединений и БД не выдержали."
+    layer: composite
+    signals:
+      - "CACHE_ENABLED=false в env app"
+      - "RETRY_BACKOFF_MS=0 и RETRY_ATTEMPTS=20"
+      - "app_requests_total к app_db_query_latency_p95_ms: ретраи множат каждый запрос"
+    masked_by: [disable-retry, restart-app]
+  reference_solution:
+    summary: "Вернуть кэш и ограничить ретраи backoff'ом, не отключая их."
+    steps:
+      - "Включить CACHE_ENABLED=true"
+      - "Вернуть RETRY_BACKOFF_MS >= 20 и RETRY_ATTEMPTS <= 5"
+      - "Вернуть лимит соединений роли (ALTER ROLE postgres CONNECTION LIMIT 100)"
+    commands:
+      - "incidentsim apply --service app --set CACHE_ENABLED=true"
+      - "incidentsim apply --service app --set RETRY_BACKOFF_MS=50 --set RETRY_ATTEMPTS=5"
+      - "incidentsim apply --service db --sql \"ALTER ROLE postgres CONNECTION LIMIT -1\""
+    rollback: "Если нагрузка упадёт ещё сильнее, проверьте, что кэш прогрет: холодный старт даёт тот же эффект"
+  distractors:
+    - id: disable-retry
+      title: "Отключить ретраи целиком — ошибок сразу меньше"
+      symptom: errors-5xx
+      masked_artifact: "устойчивость к транзиентным сбоям"
+      fails: retry-loop-bounded
+    - id: restart-app
+      title: "Перезапустить app — метрики сбросятся"
+      symptom: errors-5xx
+      masked_artifact: "причина: env восстанавливается из рестарта"
+      fails: cache-back-on
+  replay:
+    profile: workloads/cache-avalanche-retry-storm.yaml
+    duration: 20s
+    rps: 10
+  theory: |
+    Avalanche: кэш отключён, и каждый запрос пошёл в БД. Ретраи без backoff
+    превращают замедление в лавину: один упавший запрос порождает 20 попыток,
+    каждая из которых снова идёт в БД. Увеличить max_connections можно, но
+    БД закроется по памяти или CPU раньше, чем лимит.
+
+    Ключевое различие: «убрать ретраи» и «ограничить ретраи». Первое лечит
+    симптом и убивает устойчивость, второе рвёт петлю. Поэтому quality gate
+    проверяет не отсутствие ретраев, а их обратный ход.
