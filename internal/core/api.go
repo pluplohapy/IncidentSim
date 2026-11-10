@@ -149,6 +149,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleHint(w, r, session)
 	case "apply":
 		s.handleApply(w, r, session)
+	case "exec":
+		s.handleExec(w, r, session)
 	case "verify":
 		s.handleVerify(w, r, session)
 	case "reset":
@@ -234,6 +236,38 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"applied": patch})
+}
+
+// handleExec runs a statement on a database service. It is the participant's
+// write path for db-level tasks, where the fix is a statement rather than an
+// environment variable.
+func (s *Server) handleExec(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	var body struct {
+		Service   string `json:"service"`
+		Statement string `json:"statement"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
+		return
+	}
+	if body.Statement == "" {
+		writeError(w, http.StatusBadRequest, "statement is required", "")
+		return
+	}
+	result, err := s.Orchestrator.ExecSQL(r.Context(), session.ID, body.Service, body.Statement)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), result.Stderr)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exit_code": result.ExitCode,
+		"stdout":    result.Stdout,
+		"stderr":    result.Stderr,
+	})
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, session *Session) {

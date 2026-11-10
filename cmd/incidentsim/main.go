@@ -44,6 +44,9 @@ func run(args []string) error {
 	case "start":
 		_, err := client(args[1:]).Start(context.Background(), requiredArg(args[1:], "task id"))
 		return err
+	case "exec":
+		return client(args[1:]).ExecSQL(context.Background(), requiredArg(args[1:], "session id"),
+			flagValue(args[1:], "--service", ""), requiredFlagValue(args[1:], "--sql", "a --sql statement"))
 	case "metrics":
 		return client(args[1:]).Metrics(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""))
 	case "logs":
@@ -183,9 +186,16 @@ func serve(args []string) error {
 }
 
 // apply parses the fix flags and pushes them into a session.
+//
+// A fix is either a configuration change (--set) or a statement (--sql): those
+// are the two write paths a participant has, and both go through the same
+// journal so the postmortem sees them the same way.
 func apply(args []string) error {
 	sessionID := requiredArg(args, "session id")
 	service := flagValue(args, "--service", "")
+	if statement := flagValue(args, "--sql", ""); statement != "" {
+		return client(args).ExecSQL(context.Background(), sessionID, service, statement)
+	}
 	if service == "" {
 		return fmt.Errorf("--service is required")
 	}
@@ -318,6 +328,16 @@ func multiFlag(args []string, name string) []string {
 		}
 	}
 	return out
+}
+
+// requiredFlagValue returns a flag value or stops with an explanation.
+func requiredFlagValue(args []string, name, what string) string {
+	if value := flagValue(args, name, ""); value != "" {
+		return value
+	}
+	fmt.Fprintf(os.Stderr, "incidentsim: %s is required\n", what)
+	os.Exit(2)
+	return ""
 }
 
 func hasFlag(args []string, name string) bool {

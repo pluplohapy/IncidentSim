@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -216,6 +217,13 @@ func (o *Orchestrator) activateFault(ctx context.Context, session *Session, adap
 			})
 			continue
 		}
+		// A database injected before the database is up fails on a race, and
+		// the failure looks exactly like a broken task instead of a slow boot.
+		if declared.Type == injector.KindSQLConfig {
+			if err := o.waitForDatabase(ctx, adapter, session, declared.Target); err != nil {
+				return err
+			}
+		}
 		if err := registered.Activate(ctx, environment, fault); err != nil {
 			return fmt.Errorf("injector %q: %w", declared.Type, err)
 		}
@@ -332,6 +340,47 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 	return nil
 }
 
+// ExecSQL runs a statement against a database service of a session. It is the
+// participant's write path for a db-level task: `incidentsim apply --sql` ends
+// up here.
+func (o *Orchestrator) ExecSQL(ctx context.Context, sessionID, service, statement string) (runtime.ExecResult, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return runtime.ExecResult{}, err
+	}
+	adapter, err := o.adapterFor(session)
+	if err != nil {
+		return runtime.ExecResult{}, err
+	}
+	result, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+		Service: service,
+		Command: sqlCommand(session.manifest, service, statement),
+		Timeout: 30 * time.Second,
+	})
+	if err == nil && result.ExitCode != 0 {
+		err = fmt.Errorf("statement exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	if err != nil {
+		session.journal.Record(EventFixFailed, "statement could not be applied", map[string]any{
+			"service":   service,
+			"statement": statement,
+			"error":     err.Error(),
+		})
+		return result, err
+	}
+	session.mu.Lock()
+	session.AppliedFixes = append(session.AppliedFixes, runtime.EnvPatch{
+		Service: service,
+		Command: sqlCommand(session.manifest, service, statement),
+	})
+	session.mu.Unlock()
+	session.journal.Record(EventFixApplied, "participant ran a statement", map[string]any{
+		"service":   service,
+		"statement": statement,
+	})
+	return result, nil
+}
+
 // Logs returns the filtered logs of a service of a session.
 func (o *Orchestrator) Logs(ctx context.Context, sessionID, service string, opts runtime.LogOptions) ([]runtime.LogLine, error) {
 	session, err := o.Sessions.Get(sessionID)
@@ -403,6 +452,36 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 	session.journal.Close()
 	o.Sessions.Remove(session.ID)
 	return downErr
+}
+
+// waitForDatabase polls a trivial statement until the database answers.
+//
+// The official postgres image takes a few seconds to initialise, and a sql_config
+// fault that runs before that fails with a connection error that looks like a
+// broken task. Waiting here keeps the failure mode honest.
+func (o *Orchestrator) waitForDatabase(ctx context.Context, adapter runtime.Adapter, session *Session, service string) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		result, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+			Service: service,
+			Command: sqlCommand(session.manifest, service, "SELECT 1"),
+			Timeout: 5 * time.Second,
+		})
+		if err == nil && result.ExitCode == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("database %s did not come up: %w", service, err)
+			}
+			return fmt.Errorf("database %s did not come up: %s", service, strings.TrimSpace(result.Stderr))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // refreshInstance replaces the endpoints the core knows about. A recreate can

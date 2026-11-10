@@ -247,6 +247,31 @@ func (c *Client) Apply(ctx context.Context, sessionID, service string, vars map[
 	return nil
 }
 
+// ExecSQL runs a statement on a database service. It is how a db-level fix is
+// applied: the change is a statement, not a configuration variable.
+func (c *Client) ExecSQL(ctx context.Context, sessionID, service, statement string) error {
+	var response struct {
+		ExitCode int    `json:"exit_code"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	body := map[string]any{"service": service, "statement": statement}
+	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/exec", body, &response); err != nil {
+		return err
+	}
+	if response.Stdout != "" {
+		fmt.Fprintln(c.Out, strings.TrimSpace(response.Stdout))
+	}
+	if response.Stderr != "" {
+		fmt.Fprintln(c.Err, strings.TrimSpace(response.Stderr))
+	}
+	if response.ExitCode != 0 {
+		return fmt.Errorf("statement exited %d", response.ExitCode)
+	}
+	fmt.Fprintf(c.Out, "statement applied to %s\n", service)
+	return nil
+}
+
 // Verify runs both gates and prints the report.
 func (c *Client) Verify(ctx context.Context, sessionID string) error {
 	var report verifier.Report

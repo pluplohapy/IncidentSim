@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"incidentsim/internal/manifest"
 	"incidentsim/internal/runtime"
 )
 
@@ -55,16 +56,11 @@ func (e *sessionEnv) SetEnv(ctx context.Context, service string, vars map[string
 // has no database driver: a task database is reachable through the service's
 // own client. This keeps the core free of a driver dependency per database.
 func (e *sessionEnv) ExecSQL(ctx context.Context, service, statement string) (runtime.ExecResult, error) {
-	command := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement}
-	if declared, ok := e.session.manifest.Service(service); ok {
-		// A manifest can name a different database client or role, e.g. for a
-		// MySQL task, without touching the core.
-		if cli := declared.Env["SQL_CLIENT"]; cli != "" {
-			command = strings.Split(cli, " ")
-			command = append(command, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
-		}
-	}
-	return e.adapter.Exec(ctx, e.session.ID, runtime.ExecRequest{Service: service, Command: command})
+	return e.adapter.Exec(ctx, e.session.ID, runtime.ExecRequest{
+		Service: service,
+		Command: sqlCommand(e.session.manifest, service, statement),
+		Timeout: 30 * time.Second,
+	})
 }
 
 // verifyEnv is the verifier.Environment of one session. It is deliberately a
@@ -102,15 +98,9 @@ func (e *verifyEnv) SQL(ctx context.Context, service, statement string) ([]map[s
 	// The statement is executed as the database role, not as root: the
 	// official postgres image refuses a root connection, and a check that
 	// cannot connect would fail for the wrong reason.
-	command := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-F", "|", "-c", statement}
-	if declared, ok := e.session.manifest.Service(service); ok {
-		if cli := declared.Env["SQL_CLIENT"]; cli != "" {
-			command = append(strings.Split(cli, " "), "-v", "ON_ERROR_STOP=1", "-t", "-A", "-F", "|", "-c", statement)
-		}
-	}
 	res, err := e.adapter.Exec(ctx, e.session.ID, runtime.ExecRequest{
 		Service: service,
-		Command: command,
+		Command: sqlCommand(e.session.manifest, service, statement),
 		Timeout: 30 * time.Second,
 	})
 	if err != nil {
@@ -132,6 +122,42 @@ func (e *verifyEnv) SQL(ctx context.Context, service, statement string) ([]map[s
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// sqlCommand builds the command that runs a statement on a database service.
+//
+// The statement is executed as the database role, not as root: the official
+// postgres image refuses a root connection, and a check that cannot connect
+// would fail for the wrong reason. A task can name its own client and role
+// through the SQL_CLIENT environment variable of the service, which is what
+// keeps a MySQL task from needing a change in the core.
+func sqlCommand(m *manifest.Manifest, service, statement string) []string {
+	command := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement}
+	if declared, ok := m.Service(service); ok {
+		if cli := declared.Env["SQL_CLIENT"]; cli != "" {
+			command = append(strings.Split(cli, " "), "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
+			return command
+		}
+		// Without a database name psql connects to the default database, which
+		// is where "relation does not exist" comes from: the task database is
+		// the one the service declares. The statement stays last, after -c.
+		if database := databaseName(declared.Env); database != "" {
+			head := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-d", database}
+			command = append(head, "-c", statement)
+		}
+	}
+	return command
+}
+
+// databaseName resolves the database a service is configured for. The database
+// service names it POSTGRES_DB, an application service names it DB_NAME.
+func databaseName(env map[string]string) string {
+	for _, key := range []string{"POSTGRES_DB", "DB_NAME", "PGDATABASE"} {
+		if value, ok := env[key]; ok && value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // parseEnv turns `env` output into a map.
