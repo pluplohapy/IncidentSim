@@ -3,6 +3,7 @@
 # The Makefile is intentionally thin: every target is a plain `go` invocation
 # so that it behaves identically on a laptop, in CI and inside a container.
 
+TASK        ?= db-connection-leak
 BINARY      := incidentsim
 WORKLOAD    := incidentsim-workload
 GO          := go
@@ -60,6 +61,18 @@ tools: ## Install the linter
 .PHONY: workload-image
 workload-image: ## Build the simulated service image used by compose tasks
 	docker build -q -t incidentsim/workload:dev -f build/workload.Dockerfile .
+
+.PHONY: colima
+colima: ## Start the local Linux VM on macOS (Colima + Docker)
+	colima start --cpu 4 --memory 8 --disk 60 --vm-type vz
+
+.PHONY: demo
+demo: build ## Run one task end to end: broken, masked, fixed, postmortem
+	./scripts/demo.sh $(TASK)
+
+.PHONY: ansible-check
+ansible-check: ## Validate the Firecracker playbook without running it
+	ansible-playbook --syntax-check -i ansible/inventory.example.yml ansible/firecracker.yml
 
 .PHONY: run-dev
 run-dev: build ## Run the core API against the compose catalog

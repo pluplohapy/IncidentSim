@@ -13,7 +13,7 @@
 | [git-workflow](git-workflow/SKILL.md) | ветки, атомарные коммиты, stacked branches, лимит 500 строк | любой коммит |
 | [code-review](code-review/SKILL.md) | пятиосевая проверка перед коммитом | ревью своей же ветки |
 | [testing](testing/SKILL.md) | unit ядра, интеграционные на compose, тест на дистрактор | новые пакеты и проверки |
-| [docs](docs/SKILL.md) | README, Mermaid-диаграммы, примеры манифестов | любые изменения в `docs/` |
+| [docs](docs/SKILL.md) | README, Mermaid-диаграммы, примеры манифестов | любые изменения в `docs/` и `README.md` |
 
 ## Как добавить скилл
 
