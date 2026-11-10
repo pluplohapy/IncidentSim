@@ -59,9 +59,12 @@ type agent struct {
 
 // serviceProcess tracks one running service of the guest.
 type serviceProcess struct {
-	cmd     *exec.Cmd
-	logs    *ringLog
-	env     map[string]string
+	cmd  *exec.Cmd
+	logs *ringLog
+	env  map[string]string
+	// done is closed by the single goroutine that waits for the process, so a
+	// restart never races the reaper by calling Wait twice.
+	done    chan struct{}
 	started time.Time
 }
 
@@ -310,11 +313,14 @@ func (a *agent) start(service serviceConfig) error {
 func (a *agent) startLocked(service serviceConfig) error {
 	if proc, ok := a.procs[service.Name]; ok && proc.cmd != nil && proc.cmd.Process != nil {
 		_ = proc.cmd.Process.Kill()
-		_ = proc.cmd.Wait()
+		// Reaping happens in the reaper goroutine, so waiting for its channel
+		// is the safe way to make sure the pid is gone before restarting.
+		<-proc.done
 	}
 	proc := &serviceProcess{
 		logs:    newRingLog(5000),
 		env:     map[string]string{},
+		done:    make(chan struct{}),
 		started: time.Now().UTC(),
 	}
 	for key, value := range service.Env {
@@ -336,7 +342,10 @@ func (a *agent) startLocked(service serviceConfig) error {
 	}
 	proc.cmd = cmd
 	a.procs[service.Name] = proc
+	// Exactly one goroutine waits for the process: a restart that also waited
+	// would race the reaper over cmd.Wait.
 	go func() {
+		defer close(proc.done)
 		_ = cmd.Wait()
 		proc.logs.write("service exited")
 	}()
