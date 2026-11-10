@@ -27,6 +27,10 @@ type Orchestrator struct {
 	Adapters  map[string]runtime.Adapter
 	Injectors *injector.Registry
 	Verifier  verifier.Verifier
+	// Audit records what happened in a session for an external system. It is
+	// optional and off the main path: a missing or broken audit backend is a
+	// warning, never a failed session.
+	Audit AuditRecorder
 
 	mu sync.Mutex
 	// sequence keeps session ids monotonic inside a process.
@@ -449,9 +453,29 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 	downErr := adapter.Down(ctx, session.ID)
 	session.journal.Record(EventTeardown, "environment torn down", nil)
 	session.SetState(StateTornDown)
+	o.audit(session, EventSessionFinished)
 	session.journal.Close()
 	o.Sessions.Remove(session.ID)
 	return downErr
+}
+
+// audit records a session event for the configured backend. It never fails the
+// operation it is called from, because audit is an obligation and not a gate.
+func (o *Orchestrator) audit(session *Session, eventType string) {
+	if o.Audit == nil {
+		return
+	}
+	record := SessionRecord{
+		SessionID: session.ID,
+		TaskID:    session.TaskID,
+		StartedAt: session.StartedAt,
+		EndedAt:   time.Now().UTC(),
+	}
+	if err := o.Audit.Record(context.Background(), record); err != nil {
+		session.journal.Record(eventType, "audit could not record the session", map[string]any{"error": err.Error()})
+		return
+	}
+	session.journal.Record(eventType, "session recorded for audit", map[string]any{"backend": o.Audit.Name()})
 }
 
 // waitForDatabase polls a trivial statement until the database answers.

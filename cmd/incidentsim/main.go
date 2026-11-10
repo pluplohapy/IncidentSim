@@ -16,6 +16,7 @@ import (
 
 	"incidentsim/internal/adapters/compose"
 	"incidentsim/internal/adapters/firecracker"
+	"incidentsim/internal/adapters/teleport"
 	"incidentsim/internal/cli"
 	"incidentsim/internal/core"
 	"incidentsim/internal/injector"
@@ -154,6 +155,16 @@ func serve(args []string) error {
 	grader := verifier.NewManifestVerifier()
 	grader.ProjectDir = config.ProjectDir()
 	orchestrator, err := core.New(config, catalog, adapters, injector.DefaultRegistry(), grader)
+	if err != nil {
+		return err
+	}
+	// Session audit is optional: a missing Teleport degrades to a stub and a
+	// broken one is a warning in the journal.
+	orchestrator.Audit = teleport.FromConfig(teleport.Config{
+		Enabled:  config.Teleport.Enabled,
+		Endpoint: config.Teleport.Endpoint,
+		Timeout:  30 * time.Second,
+	})
 	if err != nil {
 		return err
 	}
