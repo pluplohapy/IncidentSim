@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,16 @@ const (
 	RuleLogOutputPreserved = "log_output_preserved"
 	// RuleLoggingNotDisabled requires the log stream of a service to exist.
 	RuleLoggingNotDisabled = "logging_not_disabled"
+	// RuleEnvIntAtLeast requires an environment variable to hold a number at
+	// or above a threshold. It is how a retry policy is bounded without
+	// forbidding retries, which is the difference between a bounded retry and
+	// no retry at all.
+	RuleEnvIntAtLeast = "env_int_at_least"
+	// RuleRetryLoopBounded requires the retry policy of a service to keep
+	// retrying and to back off. It is the chain-aware check: the amplifying
+	// link of a fault chain is bounded rather than removed, because removing
+	// retries turns a storm into a fast failure and only hides the loop.
+	RuleRetryLoopBounded = "retry_loop_bounded"
 )
 
 // checkPolicy runs a policy check by looking its rule up in the registry.
@@ -81,6 +92,38 @@ var PolicyRules = map[string]func(ctx context.Context, env Environment, check Ch
 		// the process that is supposed to serve it.
 		if len(vars) == 0 {
 			return fmt.Errorf("service %q has no environment: it is not running", check.Service)
+		}
+		return nil
+	},
+	RuleEnvIntAtLeast: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
+		value, present := vars[check.Query]
+		want := 0.0
+		if check.Expect != nil && check.Expect.Min != nil {
+			want = *check.Expect.Min
+		}
+		got, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || !present {
+			return fmt.Errorf("%s is %q, expected a number >= %v", check.Query, value, want)
+		}
+		if got < want {
+			return fmt.Errorf("%s is %v, want >= %v", check.Query, got, want)
+		}
+		return nil
+	},
+	RuleRetryLoopBounded: func(ctx context.Context, env Environment, check Check, vars map[string]string) error {
+		// The retry policy must stay on, with a backoff that breaks the
+		// amplification: that is the loop, and the loop is what has to be cut.
+		enabled, present := vars["RETRY_ENABLED"]
+		if !present || isOff(enabled) {
+			return fmt.Errorf("retry is disabled: the storm is gone and so is the resilience that depended on it")
+		}
+		backoff, err := strconv.Atoi(strings.TrimSpace(vars["RETRY_BACKOFF_MS"]))
+		want := 0
+		if check.Expect != nil && check.Expect.Min != nil {
+			want = int(*check.Expect.Min)
+		}
+		if err != nil || backoff < want {
+			return fmt.Errorf("RETRY_BACKOFF_MS is %q, want >= %d ms: without a backoff the storm re-forms", vars["RETRY_BACKOFF_MS"], want)
 		}
 		return nil
 	},

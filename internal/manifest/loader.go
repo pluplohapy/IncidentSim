@@ -179,14 +179,18 @@ func (m *Manifest) validateFaults() []Issue {
 				Message: "fault_chain requires metadata.level = composite",
 			})
 		}
+		// Two links of the same kind are allowed in a chain as long as they
+		// act at different times: a chain is a sequence over time, not a set of
+		// kinds. What must not repeat is the same link twice.
 		seen := map[string]bool{}
 		for i, fault := range m.Spec.FaultChain {
 			field := fmt.Sprintf("spec.fault_chain[%d]", i)
 			issues = append(issues, validateFault(field, fault, services)...)
-			if seen[fault.Type] {
-				issues = append(issues, Issue{Field: field, Message: fmt.Sprintf("duplicate fault type %q in chain", fault.Type)})
+			key := fault.Type + "|" + fault.Trigger + "|" + fmt.Sprint(fault.Options["env"])
+			if seen[key] {
+				issues = append(issues, Issue{Field: field, Message: fmt.Sprintf("fault %q with trigger %q appears twice in the chain", fault.Type, fault.Trigger)})
 			}
-			seen[fault.Type] = true
+			seen[key] = true
 		}
 	}
 	if m.Spec.Fault == nil && len(m.Spec.FaultChain) == 0 {

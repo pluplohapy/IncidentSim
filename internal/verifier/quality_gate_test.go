@@ -231,3 +231,53 @@ func TestCheckWithoutEnvironmentFails(t *testing.T) {
 }
 
 func floatPtr(value float64) *float64 { return &value }
+
+// TestChainLinkIsBoundedNotRemoved is the invariant of a composite task: the
+// amplifying link of a fault chain must be bounded, not deleted. Turning retries
+// off makes the storm disappear and takes the resilience with it, which is
+// exactly the mask a distractor aims for.
+func TestChainLinkIsBoundedNotRemoved(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "storm policy: retries on, no backoff",
+			env:     map[string]string{"RETRY_ENABLED": "true", "RETRY_BACKOFF_MS": "0"},
+			wantErr: true,
+		},
+		{
+			name:    "mask: retries disabled",
+			env:     map[string]string{"RETRY_ENABLED": "false", "RETRY_BACKOFF_MS": "50"},
+			wantErr: true,
+		},
+		{
+			name:    "fix: retries on with backoff",
+			env:     map[string]string{"RETRY_ENABLED": "true", "RETRY_BACKOFF_MS": "50"},
+			wantErr: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := PolicyRules[RuleRetryLoopBounded](context.Background(), nil,
+				Check{Query: "RETRY_BACKOFF_MS", Expect: &Expectation{Min: floatPtr(20)}}, tc.env)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestEnvIntAtLeastRule(t *testing.T) {
+	check := Check{Query: "RETRY_BACKOFF_MS", Expect: &Expectation{Min: floatPtr(20)}}
+	if err := PolicyRules[RuleEnvIntAtLeast](context.Background(), nil, check, map[string]string{"RETRY_BACKOFF_MS": "5"}); err == nil {
+		t.Fatal("a backoff below the threshold passed")
+	}
+	if err := PolicyRules[RuleEnvIntAtLeast](context.Background(), nil, check, map[string]string{"RETRY_BACKOFF_MS": "50"}); err != nil {
+		t.Fatalf("a sufficient backoff failed: %v", err)
+	}
+	if err := PolicyRules[RuleEnvIntAtLeast](context.Background(), nil, check, map[string]string{}); err == nil {
+		t.Fatal("a missing variable passed")
+	}
+}
