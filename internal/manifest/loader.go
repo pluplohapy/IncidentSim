@@ -230,7 +230,7 @@ func (m *Manifest) validateChecks() []Issue {
 			continue
 		}
 		seen := map[string]bool{}
-		hasPolicy := false
+		artifactChecks := 0
 		for i, check := range checks {
 			checkField := fmt.Sprintf("%s[%d]", field, i)
 			if err := validateID(check.ID); err != nil {
@@ -240,19 +240,32 @@ func (m *Manifest) validateChecks() []Issue {
 				issues = append(issues, Issue{Field: checkField + ".id", Message: "duplicate check id"})
 			}
 			seen[check.ID] = true
-			if check.Type == CheckPolicy {
-				hasPolicy = true
+			if isArtifactCheck(check.Type) {
+				artifactChecks++
 			}
 			issues = append(issues, validateCheck(checkField, check, services, gate)...)
 		}
-		if gate == GateQuality && !hasPolicy {
+		// Quality is about production appropriateness, which only an artefact
+		// can show: an env flag, a database fact, a log line. A gate made of
+		// http and metric checks alone cannot tell a fix from a mask.
+		if gate == GateQuality && artifactChecks == 0 {
 			issues = append(issues, Issue{
 				Field:   field,
-				Message: "quality gate must contain at least one policy check: it is what catches symptom masking",
+				Message: "quality gate must contain at least one artefact check (policy, sql, log or exec): behaviour alone cannot tell a fix from a mask",
 			})
 		}
 	}
 	return issues
+}
+
+// isArtifactCheck reports whether a check inspects an artefact of the
+// environment rather than its behaviour.
+func isArtifactCheck(kind string) bool {
+	switch kind {
+	case CheckPolicy, CheckSQL, CheckLog, CheckExec:
+		return true
+	}
+	return false
 }
 
 func validateCheck(field string, check Check, services []string, gate string) []Issue {

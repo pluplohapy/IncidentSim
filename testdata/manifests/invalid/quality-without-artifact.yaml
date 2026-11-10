@@ -1,8 +1,8 @@
 apiVersion: incidentsim/v1
 kind: Incident
 metadata:
-  id: quality-without-policy
-  title: "Quality gate без политик не отличает фикс от маскировки"
+  id: quality-without-artifact
+  title: "Quality gate без артефактных проверок не отличает фикс от маскировки"
   level: config
 spec:
   runtime:

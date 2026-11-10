@@ -79,6 +79,13 @@ spec:
       - "app_db_pool_in_race == app_db_pool_max"
       - "pg_stat_activity: много idle in transaction"
     masked_by: [raise-max-connections]
+  theory: |
+    Утечка соединений — типовой дефект уровня кода: пул берёт соединение и не
+    возвращает его в общей случае ошибки. Первое, что видит участник, —
+    исчерпание пула и 503 на запросах. Диагностика идёт по метрикам
+    app_db_pool_in_use относительно app_db_pool_max и по pg_stat_activity.
+    "Раздуть max_connections" убирает симптом и оставляет утечку: через
+    несколько часов она съест и новый лимит.
   reference_solution:
     summary: "Выключить POOL_LEAK и перезапустить app, затем убедиться что in_use упал."
     steps:

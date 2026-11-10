@@ -183,7 +183,7 @@ func TestLoadRejectsInvalidCatalogFiles(t *testing.T) {
 		"bad-level.yaml":                "metadata.level",
 		"unknown-field.yaml":            "端口",
 		"unknown-fault-target.yaml":     "spec.fault",
-		"quality-without-policy.yaml":   "policy check",
+		"quality-without-artifact.yaml": "artefact check",
 		"distractor-without-check.yaml": "spec.distractors",
 	}
 	entries, err := os.ReadDir("../../testdata/manifests/invalid")
