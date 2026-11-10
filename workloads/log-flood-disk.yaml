@@ -1,0 +1,14 @@
+# Replay-профиль задачи log-flood-disk.
+profile: log-flood-disk
+duration: 20s
+rps: 10
+concurrency: 4
+requests:
+  - name: list-orders
+    method: GET
+    path: /api/orders
+    weight: 4
+  - name: healthz
+    method: GET
+    path: /healthz
+    weight: 1

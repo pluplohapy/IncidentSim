@@ -1,0 +1,123 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: pg-table-bloat
+  title: "Таблица заказов раздулась, чтение стало медленным"
+  level: db
+  tags: [postgres, vacuum, bloat]
+  estimated_minutes: 35
+spec:
+  runtime:
+    engine: compose
+    memory_mib: 2048
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      ports: [5432]
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        SLOW_QUERY_MS: "150"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 3
+  symptoms:
+    - id: slow-orders
+      observation: "метрика app_db_dead_tuples показывает 100000 мёртвых кортежей в orders"
+    - id: dead-tuples
+      observation: "pg_stat_user_tables показывает десятки тысяч мёртвых кортежей в orders"
+  hints:
+    - level: 1
+      text: "Посмотрите метрики app_db_dead_tuples и app_db_rows: данные на месте, но таблица раздулась"
+    - level: 2
+      text: "Сравните n_live_tup и n_dead_tup в pg_stat_user_tables"
+    - level: 3
+      text: "Проверьте, включён ли autovacuum для таблицы: reloptions в pg_class"
+  fault:
+    type: sql_config
+    target: db
+    trigger: on_start
+    options:
+      statements:
+        - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+        - "TRUNCATE orders"
+        - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 50000) g"
+        - "UPDATE orders SET total = total + 1"
+        - "UPDATE orders SET total = total + 1"
+        - "ALTER TABLE orders SET (autovacuum_enabled = false)"
+        - "ANALYZE orders"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: dead-tuples-bounded
+        type: metric
+        service: app
+        query: app_db_dead_tuples
+        duration: 30s
+        expect:
+          max: 20000
+        reason: "Раздутая таблица — тот симптом, с которого начался инцидент: bloat видно в n_dead_tup"
+    quality:
+      - id: data-preserved
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM orders"
+        expect:
+          min: 50000
+        reason: "Ускорить запрос, удалив данные, — не fix: заказы клиентов нельзя терять"
+      - id: autovacuum-enabled
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM pg_class WHERE relname = 'orders' AND (reloptions IS NULL OR NOT ('autovacuum_enabled=false' = ANY(reloptions)))"
+        expect:
+          min: 1
+        reason: "Отключённый autovacuum — корень: без него bloat вернётся сам"
+  root_cause:
+    summary: "Массовый UPDATE создал десятки тысяч мёртвых кортежей, а autovacuum для orders был отключён, поэтому dead tuples не убирались и чтение деградировало."
+    layer: db
+    signals:
+      - "n_dead_tup >> n_live_tup в pg_stat_user_tables"
+      - "reloptions содержит autovacuum_enabled=false"
+    masked_by: [truncate-orders]
+  reference_solution:
+    summary: "Вернуть autovacuum и убрать мёртвые кортежи VACUUM, не удаляя данные."
+    steps:
+      - "Убедиться, что данные на месте (SELECT count(*) FROM orders)"
+      - "ALTER TABLE orders SET (autovacuum_enabled = true)"
+      - "VACUUM (VERBOSE, ANALYZE) orders"
+      - "Проверить метрику app_db_query_latency_p95_ms"
+    commands:
+      - "incidentsim exec --service db -- VACUUM ANALYZE orders"
+    rollback: "Если VACUUM FULL — он берёт эксклюзивную блокировку: делайте его в окно обслуживания"
+  distractors:
+    - id: truncate-orders
+      title: "TRUNCATE orders — запросы снова быстрые"
+      symptom: slow-orders
+      masked_artifact: "все заказы клиентов"
+      fails: data-preserved
+  replay:
+    profile: workloads/pg-table-bloat.yaml
+    duration: 20s
+    rps: 5
+  theory: |
+    Bloat — это мёртвые кортежи, которые занимают место и замедляют seq scan.
+    Автовакуум обычно убирает их сам, поэтому «выключить autovacuum, чтобы
+    снизить нагрузку» — классический способ превратить замедление в инцидент.
+    VACUUM убирает мёртвые кортежи без блокировки чтения; VACUUM FULL
+    перестраивает таблицу полностью, но берёт ACCESS EXCLUSIVE.

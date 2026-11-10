@@ -1,0 +1,14 @@
+# Replay-профиль задачи pg-table-bloat.
+profile: pg-table-bloat
+duration: 20s
+rps: 5
+concurrency: 2
+requests:
+  - name: list-orders
+    method: GET
+    path: /api/orders
+    weight: 4
+  - name: healthz
+    method: GET
+    path: /healthz
+    weight: 1
