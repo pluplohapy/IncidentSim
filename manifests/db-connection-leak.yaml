@@ -36,7 +36,7 @@ spec:
         port: 8080
         interval_seconds: 5
         timeout_seconds: 2
-  editable: [app/main.go]
+  editable: [app/handler.go]
   symptoms:
     - id: errors-5xx
       observation: "GET /api/orders зависает на 2 с и возвращает 500; app_db_pool_in_use упирается в app_db_pool_max"
@@ -46,7 +46,7 @@ spec:
     - level: 2
       text: "Посмотрите pg_stat_activity: соединения app висят в состоянии idle in transaction и не возвращаются в пул"
     - level: 3
-      text: "В обработчике заказов транзакция не закрывается (db.Begin без Rollback) и rows не закрываются — соединение не возвращается в пул"
+      text: "В обработчике заказов транзакция и rows не закрываются — соединение не возвращается в пул"
   fault:
     type: sql_config
     target: db
@@ -74,7 +74,9 @@ spec:
         type: metric
         service: app
         query: app_db_pool_in_use
-        duration: 75s
+        agg: max
+        window:
+          from: 5s
         expect:
           max: 5
         reason: "Утечка соединений должна быть исправлена в коде, а не скрыта ростом лимита пула"
@@ -82,7 +84,9 @@ spec:
         type: metric
         service: app
         query: app_errors_total
-        duration: 75s
+        agg: max
+        window:
+          from: 5s
         expect:
           max: 0
         reason: "Под нагрузкой не должно быть ошибок: пул не должен исчерпываться"
@@ -110,13 +114,13 @@ spec:
   reference_solution:
     summary: "Добавить defer tx.Rollback() и defer rows.Close() + rows.Err() в обработчик заказов"
     steps:
-      - "Открыть scenarios/db-connection-leak/workspace/app/main.go (или сессионный workspace)"
-      - "Добавить defer rows.Close() сразу после получения rows в обработчике заказов, затем rows.Err() после цикла обхода"
-      - "incidentsim apply <session> --service app --file app/main.go --content <новое содержимо>"
+      - "Открыть scenarios/db-connection-leak/workspace/app/handler.go (или сессионный workspace)"
+      - "Добавить defer tx.Rollback() после db.Begin(), затем defer rows.Close() и rows.Err() после цикла обхода"
+      - "incidentsim apply <session> --service app --file app/handler.go --content <новое содержимое handler.go>"
       - "Повторить incidentsim verify <session>"
     rollback: "incidentsim reset <session>"
     commands:
-      - "incidentsim apply <session> --service app --file app/main.go --content '<reference code>'"
+      - "incidentsim apply <session> --service app --file app/handler.go --content '<reference code>'"
       - "incidentsim verify <session>"
   distractors:
     - id: bigger-pool
@@ -139,5 +143,5 @@ spec:
         service: app
   replay:
     profile: workloads/db-connection-leak.yaml
-    duration: 75s
+    duration: 25s
     rps: 20
