@@ -334,10 +334,27 @@ func TestSchemaIsReachableAndCompiles(t *testing.T) {
 }
 
 func TestWorkspaceSpoiler(t *testing.T) {
-	if got := workspaceSpoiler("package main\n// cleanup"); got != "" {
+	if got := workspaceSpoiler("package main\n// cleanup", ""); got != "" {
 		t.Fatalf("workspaceSpoiler(clean source) = %q", got)
 	}
-	if got := workspaceSpoiler("// BROKEN implementation"); got != "broken" {
+	if got := workspaceSpoiler("// BROKEN implementation", ""); got != "broken" {
 		t.Fatalf("workspaceSpoiler(spoiler) = %q, want broken", got)
+	}
+}
+
+// A kebab-case task id contains a spoiler word as one of its own segments
+// (db-connection-leak, log-flood-disk). The hyphen is a word boundary for the
+// pattern, so the workspace of such a task must not be rejected for naming
+// itself: that made the whole catalog fail to load.
+func TestWorkspaceSpoilerIgnoresTheTaskID(t *testing.T) {
+	for _, id := range []string{"db-connection-leak", "log-flood-disk", "cache-avalanche-retry-storm"} {
+		source := "-- Task schema for " + id + ".\nCREATE TABLE orders (id int);\n"
+		if got := workspaceSpoiler(source, id); got != "" {
+			t.Fatalf("workspaceSpoiler(%s, %s) = %q, want no spoiler", id, id, got)
+		}
+	}
+	// The same words outside the task id are still a spoiler.
+	if got := workspaceSpoiler("-- db-connection-leak\n// FIXME: leak in the pool", "db-connection-leak"); got != "fixme" {
+		t.Fatalf("workspaceSpoiler(spoiler after the id) = %q, want fixme", got)
 	}
 }

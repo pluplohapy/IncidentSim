@@ -295,10 +295,12 @@ func validateReplayHooks(field string, replay *ReplaySpec) []Issue {
 }
 
 // isArtifactCheck reports whether a check inspects an artefact of the
-// environment rather than its behaviour.
+// environment rather than its behaviour. A hidden unit test is an artefact
+// too: it runs the participant's own code against the reference expectation,
+// which no behavioural probe can substitute.
 func isArtifactCheck(kind string) bool {
 	switch kind {
-	case CheckPolicy, CheckSQL, CheckLog, CheckExec:
+	case CheckPolicy, CheckSQL, CheckLog, CheckExec, CheckUnit:
 		return true
 	}
 	return false
@@ -650,7 +652,7 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 			if readErr != nil {
 				return readErr
 			}
-			if spoiler := workspaceSpoiler(string(data)); spoiler != "" {
+			if spoiler := workspaceSpoiler(string(data), m.Metadata.ID); spoiler != "" {
 				issues = append(issues, Issue{Field: field + ".workspace", Message: fmt.Sprintf("workspace file %q contains spoiler marker %q", rel, spoiler)})
 			}
 			return nil
@@ -722,11 +724,20 @@ func safeCatalogPath(path string) bool {
 // workspaceSpoiler rejects answer-bearing comments and names from a participant
 // workspace. Reference material is intentionally exempt: it is never exposed
 // before pass or give-up.
-func workspaceSpoiler(contents string) string {
+//
+// taskID is the id of the task being validated and is masked out first: the
+// kebab-case ids this project uses (db-connection-leak, log-flood-disk) contain
+// a spoiler word as one of their segments, and \b treats the hyphen as a word
+// boundary, so without the mask every such task would reject its own workspace.
+func workspaceSpoiler(contents, taskID string) string {
 	if !utf8.ValidString(contents) {
 		return ""
 	}
-	match := workspaceSpoilerPattern.FindStringSubmatch(strings.ToLower(contents))
+	source := strings.ToLower(contents)
+	if taskID != "" {
+		source = strings.ReplaceAll(source, strings.ToLower(taskID), "\x00")
+	}
+	match := workspaceSpoilerPattern.FindStringSubmatch(source)
 	if len(match) == 2 {
 		return match[1]
 	}
@@ -764,7 +775,13 @@ func referenceDiffWithinBudget(workspace, reference string, editable []string) e
 				return fmt.Errorf("workspace deleted non-editable file %q", rel)
 			}
 		default:
-			if string(wsData) != string(refData) && editableSet[rel] {
+			// A reference file that differs from the workspace outside the
+			// editable list is not a minimal patch: it either hides a change the
+			// participant is not allowed to make, or it drifted from the stand.
+			if string(wsData) != string(refData) && !editableSet[rel] {
+				return fmt.Errorf("reference file %q differs from the workspace but is not editable", rel)
+			}
+			if string(wsData) != string(refData) {
 				diffLines += lineDiffCount(string(refData), string(wsData))
 			}
 		}
@@ -772,27 +789,9 @@ func referenceDiffWithinBudget(workspace, reference string, editable []string) e
 	}); err != nil {
 		return err
 	}
-	// Files in reference but not workspace must still be editable.
-	if err := filepath.WalkDir(reference, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, _ := filepath.Rel(reference, path)
-		// SQL reference material is a database-level answer, not a
-		// workspace file, so it is intentionally allowed beside the
-		// participant workspace.
-		if strings.HasSuffix(rel, ".sql") {
-			return nil
-		}
-		if _, wsErr := os.ReadFile(filepath.Join(workspace, rel)); wsErr != nil {
-			// A reference may carry build-only or database answer material
-			// that is not part of the participant workspace.
-			return nil
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
+	// SQL reference material is a database-level answer, not a workspace file,
+	// so it is intentionally allowed beside the participant workspace; every
+	// other reference file must already be covered by the workspace walk above.
 	if diffLines > 40 {
 		return fmt.Errorf("reference diff exceeds 40 lines (%d); keep the fix minimal", diffLines)
 	}
