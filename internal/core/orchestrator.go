@@ -854,7 +854,7 @@ func (o *Orchestrator) journalWorkspaceDiff(session *Session) error {
 	if diff == "" {
 		return nil
 	}
-	session.journal.Record(EventApplyStarted, "workspace diff", map[string]any{
+	session.journal.Record(EventWorkspaceDiff, "workspace diff", map[string]any{
 		"diff": diff,
 	})
 	return nil

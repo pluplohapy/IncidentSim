@@ -252,7 +252,7 @@ func distractorFrom(events []Event) (string, string) {
 func workspaceDiffs(events []Event) []string {
 	var out []string
 	for _, event := range events {
-		if event.Type != EventApplyStarted || event.Data == nil {
+		if event.Type != EventWorkspaceDiff || event.Data == nil {
 			continue
 		}
 		if diff := stringOf(event.Data["diff"]); diff != "" {

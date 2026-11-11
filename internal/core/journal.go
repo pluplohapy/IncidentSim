@@ -31,7 +31,11 @@ const (
 	EventSessionFinished = "session.finished"
 
 	// Code-level lifecycle events.
-	EventApplyStarted     = "apply.started"
+	EventApplyStarted = "apply.started"
+	// EventWorkspaceDiff is the unified diff of the participant's workspace. It
+	// is separate from EventApplyStarted so the journal shows one apply.started
+	// per attempt and the postmortem can key the diff on its own type.
+	EventWorkspaceDiff    = "workspace.diff"
 	EventBuildOK          = "build.ok"
 	EventBuildFailed      = "build.failed"
 	EventServiceRecreated = "service.recreated"
