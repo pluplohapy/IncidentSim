@@ -4,6 +4,9 @@
 # never disagree about where an artefact lives.
 
 incidentsim_user: incidentsim
+incidentsim_firecracker_version: "1.11.0"
+incidentsim_firecracker_arch: "{{ 'aarch64' if ansible_architecture in ['aarch64', 'arm64'] else 'x86_64' }}"
+incidentsim_firecracker_url: "https://github.com/firecracker-microvm/firecracker/releases/download/v{{ incidentsim_firecracker_version }}/firecracker-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}.tgz"
 incidentsim_state_dir: /var/lib/incidentsim
 incidentsim_rootfs_dir: /var/lib/incidentsim/rootfs
 incidentsim_snapshot_dir: /var/lib/incidentsim/snapshots
@@ -11,7 +14,7 @@ incidentsim_vm_dir: /var/lib/incidentsim/vms
 
 # Guest kernel. Firecracker needs a kernel built for a microVM: no modules, a
 # minimal config and virtio support.
-incidentsim_kernel_url: "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernel/linux-4.20.tar.gz"
+incidentsim_kernel_url: "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/{{ incidentsim_firecracker_arch }}/kernel/vmlinux-5.10.bin"
 
 # Network for the microVMs. A tap device per VM plugged into a bridge is what
 # lets the host reach the guest and the guest reach the host, while the guest

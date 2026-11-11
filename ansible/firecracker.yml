@@ -51,15 +51,32 @@
       changed_when: false
       tags: [kvm]
 
-    - name: Install Firecracker and the agent binaries
-      ansible.builtin.copy:
-        src: "files/{{ item.src }}"
-        dest: "/usr/local/bin/{{ item.dest }}"
-        mode: "0755"
-      loop:
-        - { src: firecracker, dest: firecracker }
-        - { src: incidentsim-guest, dest: incidentsim-guest }
-        - { src: jailer, dest: jailer }
+    - name: Download pinned Firecracker release
+      ansible.builtin.get_url:
+        url: "{{ incidentsim_firecracker_url }}"
+        dest: "/tmp/firecracker-{{ incidentsim_firecracker_version }}.tgz"
+        mode: "0644"
+      tags: [firecracker]
+
+    - name: Extract pinned Firecracker release
+      ansible.builtin.unarchive:
+        src: "/tmp/firecracker-{{ incidentsim_firecracker_version }}.tgz"
+        dest: /usr/local/bin
+        remote_src: true
+        extra_opts: [--strip-components=1]
+        include:
+          - "release-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}/firecracker-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}"
+          - "release-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}/jailer-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}"
+      tags: [firecracker]
+
+    - name: Rename extracted Firecracker binaries
+      ansible.builtin.shell: |
+        set -eu
+        install -m 0755 /usr/local/bin/release-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}/firecracker-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }} /usr/local/bin/firecracker
+        install -m 0755 /usr/local/bin/release-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }}/jailer-v{{ incidentsim_firecracker_version }}-{{ incidentsim_firecracker_arch }} /usr/local/bin/jailer
+      args:
+        creates: /usr/local/bin/firecracker
+      tags: [firecracker]
       tags: [firecracker]
 
     - name: Create the state directories

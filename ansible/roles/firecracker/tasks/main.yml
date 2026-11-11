@@ -22,25 +22,22 @@
   ansible.builtin.command:
     cmd: ip tuntap add dev incidentsim-tap{{ item }} mode tap
   loop: "{{ range(0, incidentsim_tap_count | int) | list }}"
-  register: tap_create
-  changed_when: "'exists' not in tap_create.stderr"
-  failed_when:
-    - tap_create.rc != 0
-    - "'exists' not in tap_create.stderr"
+  args:
+    creates: "/sys/class/net/incidentsim-tap{{ item }}"
   tags: [network]
 
 - name: Attach the tap devices to the bridge
   ansible.builtin.command:
     cmd: ip link set incidentsim-tap{{ item }} master {{ incidentsim_bridge }}
   loop: "{{ range(0, incidentsim_tap_count | int) | list }}"
-  changed_when: true
+  changed_when: false
   tags: [network]
 
 - name: Bring the tap devices up
   ansible.builtin.command:
     cmd: ip link set incidentsim-tap{{ item }} up
   loop: "{{ range(0, incidentsim_tap_count | int) | list }}"
-  changed_when: true
+  changed_when: false
   tags: [network]
 
 - name: Enable the network unit
