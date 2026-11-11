@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
 )
@@ -10,9 +9,6 @@ import (
 // edits this file to fix the incident.
 var handlerRoutes = func(mux *http.ServeMux) {
 	mux.HandleFunc("/api/orders", ordersHandler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"status":"ok"}`)
-	})
 }
 
 // ordersHandler lists orders. FIXED: the transaction and rows are properly
@@ -52,5 +48,3 @@ func ordersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"orders_count":%d}`, len(ids))
 }
-
-var db *sql.DB

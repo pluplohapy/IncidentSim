@@ -751,9 +751,10 @@ func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d 
 	if d.Apply == nil {
 		return d.Fails, fmt.Errorf("distractor %q has no apply action", d.ID)
 	}
+	var refreshed *runtime.Instance
 	switch d.Apply.Kind {
 	case "env":
-		_, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{
+		refreshed, err = adapter.Apply(ctx, session.ID, runtime.EnvPatch{
 			Service: d.Apply.Service, Vars: d.Apply.Vars, Restart: true,
 		})
 		if err != nil {
@@ -782,7 +783,8 @@ func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d 
 		if err != nil {
 			return d.Fails, fmt.Errorf("config artifact: %w", err)
 		}
-		if _, err := adapter.Deploy(ctx, session.ID, artifact, true); err != nil {
+		refreshed, err = adapter.Deploy(ctx, session.ID, artifact, true)
+		if err != nil {
 			return d.Fails, fmt.Errorf("deploy distractor files: %w", err)
 		}
 	case "sql":
@@ -809,7 +811,7 @@ func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d 
 			return d.Fails, fmt.Errorf("distractor exec %q: %w", d.Apply.From, err)
 		}
 	case "restart":
-		_, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{
+		refreshed, err = adapter.Apply(ctx, session.ID, runtime.EnvPatch{
 			Service: d.Apply.Service, Restart: true,
 		})
 		if err != nil {
@@ -825,6 +827,7 @@ func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d 
 	default:
 		return d.Fails, fmt.Errorf("unknown distractor apply kind %q", d.Apply.Kind)
 	}
+	o.refreshInstance(session, refreshed)
 	session.mu.Lock()
 	session.AppliedFixes = append(session.AppliedFixes, runtime.EnvPatch{
 		Service: d.Apply.Service,

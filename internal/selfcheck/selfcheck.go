@@ -163,7 +163,12 @@ func contract(ctx context.Context, api *cli.Client, taskID, engine string) (*Res
 		}
 		// The failing quality check must be the one named in fails.
 		failedIDs := failedCheckIDs(report.Quality.Results)
-		ok := len(failedIDs) == 1 && failedIDs[0] == d.Fails
+		// A distractor may expose more than one quality symptom of the same
+		// root cause (for example a leaked transaction can exceed both the pool
+		// gauge and the idle-in-transaction bound). The manifest's `fails` is
+		// the check it promises to catch; require that check, but keep all
+		// observed failures in the result for diagnosis.
+		ok := containsString(failedIDs, d.Fails)
 		dr.OK = ok
 		dr.ActualFails = strings.Join(failedIDs, ",")
 		if !ok {
@@ -293,6 +298,15 @@ func failedCheckIDs(results []verifier.Result) []string {
 		}
 	}
 	return out
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // taskDetail mirrors cli.taskDetail but is defined here to avoid importing cli

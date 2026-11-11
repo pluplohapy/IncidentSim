@@ -87,7 +87,6 @@ func (b *GoBuilder) Build(ctx context.Context, workspaceDir string) (*runtime.Ar
 	}
 	steps := [][]string{
 		append(append([]string{"run", "--rm"}, baseArgs...), []string{"-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "mod", "download"}...),
-		append(append([]string{"run", "--rm", "--network", "none"}, baseArgs...), []string{"-v", outDir + ":/out", "-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "build", "-trimpath", "-o", "/out/app", target}...),
 	}
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, "docker", step...)
@@ -100,7 +99,38 @@ func (b *GoBuilder) Build(ctx context.Context, workspaceDir string) (*runtime.Ar
 		_ = out
 	}
 
+	// Do not bind-mount the output directory for the build step. Docker Desktop
+	// and remote daemons may run the engine in a separate Linux VM, where a
+	// host-side temporary path is not a usable bind source. Build in the
+	// container's writable layer and copy the artifact back through the Docker
+	// API/CLI instead.
+	containerName := fmt.Sprintf("incidentsim-build-%d", time.Now().UnixNano())
+	create := append([]string{"create", "--name", containerName, "--network", "none"}, baseArgs...)
+	create = append(create, "-w", "/src", "-v", workspaceDir+":/src:ro", b.Image, "go", "build", "-trimpath", "-o", "/out/app", target)
+	createCmd := exec.CommandContext(ctx, "docker", create...)
+	if output, err := createCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("docker build container: %w\n%s", err, output)
+	}
+	defer func() {
+		_ = exec.CommandContext(context.Background(), "docker", "rm", "-f", containerName).Run()
+	}()
+
+	startCmd := exec.CommandContext(ctx, "docker", "start", "--attach", containerName)
+	if output, err := startCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("docker build step: %w\n%s", err, output)
+	}
+
 	binaryPath := filepath.Join(outDir, "app")
+	copyCmd := exec.CommandContext(ctx, "docker", "cp", containerName+":/out/app", binaryPath)
+	if output, err := copyCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("copy build artifact: %w\n%s", err, output)
+	}
+	if info, err := os.Stat(binaryPath); err != nil || info.Size() == 0 {
+		if err == nil {
+			err = fmt.Errorf("artifact is empty")
+		}
+		return nil, fmt.Errorf("validate build artifact: %w", err)
+	}
 	completed = true
 	return &runtime.Artifact{
 		Service: "app",

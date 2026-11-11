@@ -9,9 +9,6 @@ import (
 // edits this file to fix the incident.
 var handlerRoutes = func(mux *http.ServeMux) {
 	mux.HandleFunc("/api/orders", ordersHandler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"status":"ok"}`)
-	})
 }
 
 // ordersHandler lists orders. The connection pool runs dry under load

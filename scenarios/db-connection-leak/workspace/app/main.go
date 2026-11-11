@@ -28,6 +28,7 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
+	state.DB = db
 
 	// Run migrations from app/migrations/*.sql.
 	if entries, err := os.ReadDir("app/migrations"); err == nil {
