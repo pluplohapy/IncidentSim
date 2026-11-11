@@ -93,3 +93,70 @@ reset: PASS
    проверками ответа; reference должен отличаться от workspace не более чем на
    40 строк и только в editable-файлах
 5. Запустите `scripts/sync-stand.sh <id>` и `incidentsim validate manifests`
+
+## Рецепт code-задачи (контракт автора)
+
+Code-задача = общий стенд (`internal/stand`, синхронизируется
+`scripts/sync-stand.sh`) + один сломанный `app/handler.go` (+ опционально
+`app/migrations/*.sql`). Эталон (`reference/app/handler.go`) отличается от
+workspace только в editable и не более чем на 40 строк диффа.
+
+### Что доступно handler.go (пакет main того же каталога)
+
+| Символ | Назначение |
+|---|---|
+| `db *sql.DB` | живой пул к БД (открыт до регистрации маршрутов) |
+| `state *State` | честные счётчики стенда |
+| `state.incRequests()`, `state.incErrors()` | счётчики запросов/ошибок |
+| `state.incDBQueries()`, `state.incDepCalls()` | счётчики запросов к БД и к зависимости |
+| `state.AddCacheHits(n)`, `state.SetCacheEntries(n)` | честные метрики кэша |
+| `state.AddRetries(n)` | честный счётчик ретраев |
+| `state.AddLogBytes(n)`, `state.SetDiskUsagePct(p)` | метрики логов/диска |
+| `state.SetDBLatencyP95(d)`, `state.SetDBTableStats(dead, rows)` | метрики БД |
+| `NewJobQueue(db, state)` | очередь с таблицей `jobs` (`Process`, `Enqueue`) |
+| `InvariantHandler(check)` → `http.HandlerFunc` | `/debug/invariant/<name>` |
+| `loadConfig()` | env + оверлей `/etc/app/app.conf` |
+| `cfg.LogLevel`, `cfg.LogFile`, `cfg.PoolMax` | политики из конфига |
+
+Метрики стенда: `app_requests_total`, `app_errors_total`,
+`app_db_queries_total`, `app_db_pool_in_use`, `app_db_pool_max`,
+`app_dep_calls_total`, `app_cache_entries`, `app_cache_hits_total`,
+`app_retry_requests`, `app_log_bytes`, `app_disk_pct`,
+`app_db_query_latency_p95_ms`, `app_db_dead_tuples`, `app_db_rows`,
+`go_goroutines`, `go_heap_bytes`, `open_fds`, `uptime_seconds`.
+
+### Стенд `dep` (зависимость)
+
+Третий сервис `depstub` (`image: incidentsim/workload:dev`, `command:
+["incidentsim-depstub"]`, порт 9090) управляется через
+`POST http://depstub:9090/control` телом `{"error_rate":0.2,"latency_ms":50,
+"down":false,"hang_pct":0.1}`. Приложение обращается к нему по
+`http://depstub:9090/work`.
+
+### Обязательные элементы задачи
+
+1. Симптомы наблюдаемы без чтения кода (метрика/логи/SQL/HTTP).
+2. Три подсказки с непрерывными уровнями 1..3.
+3. `verify.correctness`: `/healthz` + предметная проверка «работает сейчас».
+4. `verify.quality`: **артефактная** проверка (`sql`/`policy`/`log`/`exec`) +
+   проверка **поведения по окну** (`metric` с `agg` + `window.from`, либо
+   `replay` с `field`).
+5. Дистракторы: у каждого `apply` и `fails` (id quality-проверки); `fails`
+   уникальны в пределах задачи; «увеличить лимит/пул» и «перезапустить» —
+   там, где они применимы.
+6. Replay: `duration <= 30s`, `rps` и `concurrency` разумные; verify обязан
+   укладываться в 45 с.
+
+### Слова-спойлеры
+
+Workspace (включая комментарии) не должен содержать отдельных слов
+`bug`, `broken`, `fixme`, `leak` — `validate` и старт ядра отклоняют такой
+workspace. Идентификаторы вроде `leakDetector` допустимы (границы слова).
+
+### Проверка задачи
+
+```console
+./scripts/sync-stand.sh <id>
+./bin/incidentsim validate manifests
+INCIDENTSIM_ADMIN=1 ./bin/incidentsim selfcheck <id> --engine compose
+```

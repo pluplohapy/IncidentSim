@@ -11,6 +11,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	// The driver registers itself with database/sql: without it every task
+	// service dies at boot with "unknown driver postgres" and no endpoint ever
+	// answers, which surfaces as a Start timeout instead of a usable session.
+	_ "github.com/lib/pq"
 )
 
 // db is the database pool the task handler uses. The stand assigns it before
@@ -118,20 +123,24 @@ func RunMigrations(db *sql.DB) {
 	}
 }
 
-// splitSQLStatements splits a migration file into statements on semicolons,
-// dropping comment-only lines.
+// splitSQLStatements splits a migration file into statements on semicolons.
+//
+// Comment lines are dropped first, and only then the text is split: a
+// semicolon inside a -- comment would otherwise cut the statement in half and
+// the database would be asked to execute comment prose as SQL.
 func splitSQLStatements(content string) []string {
-	var out []string
-	for _, chunk := range strings.Split(content, ";") {
-		var lines []string
-		for _, line := range strings.Split(chunk, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
-			}
-			lines = append(lines, line)
+	var code strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
 		}
-		stmt := strings.TrimSpace(strings.Join(lines, "\n"))
+		code.WriteString(line)
+		code.WriteString("\n")
+	}
+	var out []string
+	for _, stmt := range strings.Split(code.String(), ";") {
+		stmt = strings.TrimSpace(stmt)
 		if stmt != "" {
 			out = append(out, stmt)
 		}

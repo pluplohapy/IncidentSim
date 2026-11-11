@@ -399,18 +399,22 @@ func applyReferenceFix(ctx context.Context, api *cli.Client, sessionID string, t
 }
 
 // splitSQLStatements splits a reference .sql file into individual statements.
+//
+// Comment lines are removed before the split on semicolons: a -- comment that
+// contains a semicolon would otherwise cut the following statement in half.
 func splitSQLStatements(content string) []string {
-	var out []string
-	for _, chunk := range strings.Split(content, ";") {
-		var lines []string
-		for _, line := range strings.Split(chunk, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
-			}
-			lines = append(lines, line)
+	var code strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
 		}
-		stmt := strings.TrimSpace(strings.Join(lines, "\n"))
+		code.WriteString(line)
+		code.WriteString("\n")
+	}
+	var out []string
+	for _, stmt := range strings.Split(code.String(), ";") {
+		stmt = strings.TrimSpace(stmt)
 		if stmt != "" {
 			out = append(out, stmt)
 		}

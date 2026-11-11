@@ -11,6 +11,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	// The driver registers itself with database/sql: without it every task
+	// service dies at boot with "unknown driver postgres" and no endpoint ever
+	// answers, which surfaces as a Start timeout instead of a usable session.
+	_ "github.com/lib/pq"
 )
 
 // db is the database pool the task handler uses. The stand assigns it before
@@ -97,41 +102,71 @@ func Serve(cfg Config, routes func(*http.ServeMux)) {
 
 // RunMigrations applies app/migrations/*.sql in lexical order. Migrations are
 // part of the task surface: a missing index is created by a migration file.
+//
+// The database is a sibling container that may still be initialising, so the
+// set is retried until it succeeds or the deadline passes: a service that
+// exits on the first connection refusal never comes up.
 func RunMigrations(db *sql.DB) {
 	entries, err := os.ReadDir("app/migrations")
 	if err != nil {
 		return
 	}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		lastErr := applyMigrations(db, entries)
+		if lastErr == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Fatalf("%v", lastErr)
+		}
+		log.Printf("migration pending: %v (retrying)", lastErr)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// applyMigrations runs every statement once and stops at the first error.
+func applyMigrations(db *sql.DB, entries []os.DirEntry) error {
+	var applied int
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
 		data, err := os.ReadFile("app/migrations/" + entry.Name())
 		if err != nil {
-			log.Fatalf("read migration %s: %v", entry.Name(), err)
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 		for _, stmt := range splitSQLStatements(string(data)) {
 			if _, err := db.Exec(stmt); err != nil {
-				log.Fatalf("migration %s: %v", entry.Name(), err)
+				return fmt.Errorf("migration %s: %w", entry.Name(), err)
 			}
+			applied++
 		}
 	}
+	if applied > 0 {
+		log.Printf("migrations applied: %d statements", applied)
+	}
+	return nil
 }
 
-// splitSQLStatements splits a migration file into statements on semicolons,
-// dropping comment-only lines.
+// splitSQLStatements splits a migration file into statements on semicolons.
+//
+// Comment lines are dropped first, and only then the text is split: a
+// semicolon inside a -- comment would otherwise cut the statement in half and
+// the database would be asked to execute comment prose as SQL.
 func splitSQLStatements(content string) []string {
-	var out []string
-	for _, chunk := range strings.Split(content, ";") {
-		var lines []string
-		for _, line := range strings.Split(chunk, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
-			}
-			lines = append(lines, line)
+	var code strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
 		}
-		stmt := strings.TrimSpace(strings.Join(lines, "\n"))
+		code.WriteString(line)
+		code.WriteString("\n")
+	}
+	var out []string
+	for _, stmt := range strings.Split(code.String(), ";") {
+		stmt = strings.TrimSpace(stmt)
 		if stmt != "" {
 			out = append(out, stmt)
 		}
