@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 )
@@ -51,3 +52,5 @@ func ordersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"orders_count":%d}`, len(ids))
 }
+
+var db *sql.DB

@@ -96,8 +96,8 @@ func newState() *State {
 	return &State{startedAt: time.Now().UTC()}
 }
 
-func (s *State) incRequests() { s.mu.Lock(); s.requests++; s.mu.Unlock() }
-func (s *State) incErrors()   { s.mu.Lock(); s.errors++; s.mu.Unlock() }
+func (s *State) incRequests()  { s.mu.Lock(); s.requests++; s.mu.Unlock() }
+func (s *State) incErrors()    { s.mu.Lock(); s.errors++; s.mu.Unlock() }
 func (s *State) incDBQueries() { s.mu.Lock(); s.dbQueriesTotal++; s.mu.Unlock() }
 func (s *State) incDepCalls()  { s.mu.Lock(); s.depCalls++; s.mu.Unlock() }
 
