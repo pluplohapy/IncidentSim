@@ -28,6 +28,7 @@ import (
 	"incidentsim/internal/core"
 	"incidentsim/internal/injector"
 	"incidentsim/internal/runtime"
+	selfcheckpkg "incidentsim/internal/selfcheck"
 	"incidentsim/internal/verifier"
 	"incidentsim/internal/version"
 )
@@ -641,6 +642,7 @@ func validateCmd(args []string) error {
 
 func selfcheckCmd(args []string) error {
 	fs := flag.NewFlagSet("selfcheck", flag.ExitOnError)
+	engine := fs.String("engine", "compose", "движок: compose|firecracker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -648,7 +650,15 @@ func selfcheckCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return selfcheck(context.Background(), client(nil), task)
+	res, err := selfcheckpkg.Contract(context.Background(), client(nil), selfcheckpkg.Engine(*engine), task)
+	if err != nil {
+		return err
+	}
+	res.Print(os.Stdout)
+	if !res.Overall {
+		return fmt.Errorf("selfcheck %s failed", task)
+	}
+	return nil
 }
 
 // --- helpers ---
