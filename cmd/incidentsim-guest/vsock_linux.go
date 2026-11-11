@@ -17,6 +17,9 @@ import (
 const (
 	afVsock         = 40
 	soVmSocketConst = 1
+	// VMADDR_CID_ANY makes the listener accept connections addressed to this
+	// guest. CID 2 is VMADDR_CID_HOST and is never valid as a guest bind address.
+	vmaddrCIDAny = ^uint32(0)
 )
 
 // sockaddrVM mirrors struct sockaddr_vm from <linux/vm_sockets.h>.
@@ -36,7 +39,7 @@ func listenVsock(port uint32) (net.Listener, error) {
 	if errno != 0 {
 		return nil, fmt.Errorf("socket(AF_VSOCK): %w", errno)
 	}
-	addr := &sockaddrVM{family: afVsock, port: port, cid: 2 /* VMADDR_CID_HOST is used for outbound; guest binds any */}
+	addr := &sockaddrVM{family: afVsock, port: port, cid: vmaddrCIDAny}
 	if _, _, errno := syscall.Syscall(syscall.SYS_BIND, fd,
 		uintptr(unsafe.Pointer(addr)), unsafe.Sizeof(*addr)); errno != 0 {
 		syscall.Close(int(fd))
