@@ -1,6 +1,7 @@
 package firecracker
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,8 @@ import (
 
 // Config points the adapter at the artefacts Ansible provisions.
 type Config struct {
+	// Version is the Firecracker API/binary version provisioned by Ansible.
+	Version string
 	// FirecrackerBin is the firecracker binary.
 	FirecrackerBin string
 	// SocketDir holds the API sockets of running VMs.
@@ -30,6 +33,10 @@ type Config struct {
 	BaselineDir string
 	// GuestAgentPort is the vsock port the guest agent listens on.
 	GuestAgentPort uint32
+	// GuestIP and TapDevice expose guest service ports to core health/replay
+	// checks. They are host-only network addresses, never public bindings.
+	GuestIP   string
+	TapDevice string
 	// FirecrackerBinArgs are extra firecracker flags, e.g. --seccomp-filter.
 	ExtraArgs []string
 }
@@ -38,11 +45,14 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		FirecrackerBin: "/usr/local/bin/firecracker",
+		Version:        "1.11.0",
 		SocketDir:      "/var/lib/incidentsim/vms",
 		KernelImage:    "/var/lib/incidentsim/vmlinux",
 		RootfsDir:      "/var/lib/incidentsim/rootfs",
 		BaselineDir:    "/var/lib/incidentsim/snapshots",
 		GuestAgentPort: 51000,
+		GuestIP:        "172.30.0.2",
+		TapDevice:      "incidentsim-tap0",
 	}
 }
 
@@ -74,6 +84,7 @@ type vm struct {
 	started  time.Time
 	ports    map[string]int
 	pid      int
+	process  *exec.Cmd
 }
 
 // New returns an adapter using the given configuration.
@@ -115,6 +126,12 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	}
 	machine.rootfs = rootfs
 	machine.overlay = filepath.Join(machine.workdir, "overlay.ext4")
+	if err := createOverlay(machine.overlay); err != nil {
+		return nil, err
+	}
+	if err := a.launch(ctx, machine); err != nil {
+		return nil, err
+	}
 
 	if err := a.writeGuestConfig(machine); err != nil {
 		return nil, err
@@ -234,6 +251,19 @@ func (a *Adapter) start(ctx context.Context, machine *vm) error {
 	}); err != nil {
 		return fmt.Errorf("attach overlay: %w", err)
 	}
+	if err := machine.api.AddVsock(ctx, VsockDevice{
+		GuestCID: vsockGuestCID,
+		UDSPath:  filepath.Join(machine.workdir, "vsock.sock"),
+	}); err != nil {
+		return fmt.Errorf("configure vsock: %w", err)
+	}
+	if a.Config.TapDevice != "" {
+		if err := machine.api.AddNetworkInterface(ctx, NetworkInterface{
+			IfaceID: "eth0", HostDevName: a.Config.TapDevice, GuestMAC: "AA:FC:00:00:00:02",
+		}); err != nil {
+			return fmt.Errorf("configure network: %w", err)
+		}
+	}
 	return machine.api.Start(ctx)
 }
 
@@ -275,8 +305,7 @@ func (a *Adapter) waitForAgent(ctx context.Context, machine *vm) error {
 
 // dialAgent connects to the guest agent over vsock.
 func (a *Adapter) dialAgent(ctx context.Context, machine *vm) (net.Conn, error) {
-	var dialer net.Dialer
-	return dialer.DialContext(ctx, "vsock", fmt.Sprintf("%d:%d", vsockGuestCID, a.Config.GuestAgentPort))
+	return vsockDial(ctx, filepath.Join(machine.workdir, "vsock.sock"), a.Config.GuestAgentPort)
 }
 
 // writeGuestConfig writes the configuration the guest agent reads at boot.
@@ -310,9 +339,7 @@ func (a *Adapter) describe(machine *vm) *runtime.Instance {
 		if len(service.Ports) > 0 {
 			port = service.Ports[0]
 		}
-		// Inside a microVM the service speaks to the guest agent, not to the
-		// host: the endpoint is the vsock address the adapter uses.
-		endpoint := fmt.Sprintf("vsock://%d:%d", vsockGuestCID, uint32(a.Config.GuestAgentPort))
+		endpoint := fmt.Sprintf("%s:%d", a.Config.GuestIP, port)
 		services = append(services, runtime.Service{
 			Name:          service.Name,
 			Endpoint:      endpoint,
@@ -344,7 +371,7 @@ func (a *Adapter) Reset(ctx context.Context, sessionID string) (*runtime.Instanc
 	if _, err := os.Stat(snapshot); err != nil {
 		return nil, fmt.Errorf("baseline snapshot %s is missing: run `make ansible-provision`", snapshot)
 	}
-	if err := machine.api.Resume(ctx, SnapshotResume{
+	if err := machine.api.LoadSnapshot(ctx, SnapshotResume{
 		SnapshotPath:   snapshot,
 		MemFilePath:    snapshot + ".mem",
 		EnableDiffSnap: true,
@@ -374,8 +401,8 @@ func (a *Adapter) pauseOrKill(ctx context.Context, machine *vm) error {
 // Apply implements runtime.Adapter: a config change is written to the overlay
 // and the guest agent restarts the service with the new environment.
 func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) (*runtime.Instance, error) {
-	if len(patch.Files) > 0 || patch.Image != "" {
-		return nil, fmt.Errorf("%w: firecracker engine does not support file or image patches", runtime.ErrUnsupported)
+	if patch.Image != "" {
+		return nil, fmt.Errorf("%w: image patches are not supported; deploy a binary artifact", runtime.ErrUnsupported)
 	}
 	machine, err := a.machine(sessionID)
 	if err != nil {
@@ -426,7 +453,42 @@ func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Arti
 	if _, err := a.machine(sessionID); err != nil {
 		return nil, err
 	}
-	return nil, runtime.ErrUnsupported
+	machine, err := a.machine(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if art.Service == "" {
+		return nil, fmt.Errorf("artifact service is required")
+	}
+	if art.Kind != "binary" && art.Kind != "files" {
+		return nil, fmt.Errorf("%w: artifact kind %q", runtime.ErrUnsupported, art.Kind)
+	}
+	conn, err := a.dialAgent(ctx, machine)
+	if err != nil {
+		return nil, fmt.Errorf("reach guest agent: %w", err)
+	}
+	defer conn.Close()
+	request := map[string]any{"service": art.Service, "kind": art.Kind, "restart": restart, "files": art.Files}
+	if art.Kind == "binary" {
+		data, readErr := os.ReadFile(art.Path)
+		if readErr != nil {
+			return nil, fmt.Errorf("read artifact: %w", readErr)
+		}
+		request["binary"] = data
+	}
+	if err := postJSON(conn, "/put-file", request); err != nil {
+		return nil, err
+	}
+	var response struct {
+		Deployed string `json:"deployed"`
+	}
+	if err := readJSON(conn, &response); err != nil {
+		return nil, err
+	}
+	if response.Deployed != art.Service {
+		return nil, fmt.Errorf("guest deployed %q, expected %q", response.Deployed, art.Service)
+	}
+	return a.describe(machine), nil
 }
 
 // Exec implements runtime.Adapter through the guest agent.
@@ -539,10 +601,74 @@ func (a *Adapter) Down(ctx context.Context, sessionID string) error {
 		return err
 	}
 	_ = machine.api.Pause(ctx)
+	if machine.process != nil && machine.process.Process != nil {
+		_ = machine.process.Process.Kill()
+		_, _ = machine.process.Process.Wait()
+	}
 	a.mu.Lock()
 	delete(a.sessions, sessionID)
 	a.mu.Unlock()
 	return nil
+}
+
+func (a *Adapter) launch(ctx context.Context, machine *vm) error {
+	if err := os.RemoveAll(machine.api.SocketPath); err != nil {
+		return err
+	}
+	args := append([]string{"--api-sock", machine.api.SocketPath}, a.Config.ExtraArgs...)
+	cmd := exec.CommandContext(ctx, a.Bin, args...)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start firecracker: %w", err)
+	}
+	machine.process, machine.pid = cmd, cmd.Process.Pid
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(machine.api.SocketPath); err == nil {
+			return nil
+		}
+		if cmd.ProcessState != nil {
+			return fmt.Errorf("firecracker exited before opening API socket")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	return fmt.Errorf("firecracker did not create API socket %s", machine.api.SocketPath)
+}
+
+func createOverlay(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create overlay: %w", err)
+	}
+	defer f.Close()
+	if err := f.Truncate(512 << 20); err != nil {
+		return fmt.Errorf("size overlay: %w", err)
+	}
+	return nil
+}
+
+// vsockDial speaks Firecracker's UDS CONNECT protocol. The response starts
+// with OK on success and leaves the stream connected to the guest port.
+func vsockDial(ctx context.Context, socket string, port uint32) (net.Conn, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", port); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if !strings.HasPrefix(line, "OK") {
+		conn.Close()
+		return nil, fmt.Errorf("vsock connect rejected: %s", strings.TrimSpace(line))
+	}
+	return conn, nil
 }
 
 func (a *Adapter) machine(sessionID string) (*vm, error) {

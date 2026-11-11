@@ -126,7 +126,7 @@ func TestAPIStartsTheVM(t *testing.T) {
 	}
 }
 
-func TestAPISnapshotCreateAndResume(t *testing.T) {
+func TestAPISnapshotCreateAndLoad(t *testing.T) {
 	fake, api := newAPIFake(t)
 	ctx := context.Background()
 
@@ -137,16 +137,14 @@ func TestAPISnapshotCreateAndResume(t *testing.T) {
 		t.Fatalf("snapshot body = %v", body)
 	}
 
-	// Resume is a PATCH in the Firecracker API, not a PUT: getting this wrong
-	// makes a reset fail with a 405 instead of restoring the baseline.
-	if err := api.Resume(ctx, SnapshotResume{SnapshotPath: "/s/base.snap", MemFilePath: "/s/base.mem", ResumeVM: true}); err != nil {
-		t.Fatalf("Resume: %v", err)
+	if err := api.LoadSnapshot(ctx, SnapshotResume{SnapshotPath: "/s/base.snap", MemFilePath: "/s/base.mem", ResumeVM: true}); err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
 	}
-	if !fake.seen("PATCH /snapshot/resume") {
-		t.Fatalf("resume was not sent as a PATCH: %v", fake.requests)
+	if !fake.seen("PUT /snapshot/load") {
+		t.Fatalf("snapshot load was not sent correctly: %v", fake.requests)
 	}
-	if body := fake.body("PATCH /snapshot/resume"); body["resume_vm"] != true {
-		t.Fatalf("resume body = %v", body)
+	if body := fake.body("PUT /snapshot/load"); body["resume_vm"] != true {
+		t.Fatalf("load body = %v", body)
 	}
 }
 

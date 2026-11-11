@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -145,11 +146,95 @@ func (a *agent) handler() http.Handler {
 	mux.HandleFunc("/metrics", a.handleMetrics)
 	mux.HandleFunc("/env", a.handleEnv)
 	mux.HandleFunc("/restart", a.handleRestart)
+	mux.HandleFunc("/put-file", a.handlePutFile)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "guest agent ok")
 	})
 	return mux
+}
+
+// handlePutFile atomically installs a binary or static files supplied by the
+// host adapter, then restarts the requested service. It deliberately accepts
+// no arbitrary destination paths: an artifact stays under /run/incidentsim.
+func (a *agent) handlePutFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		Service string            `json:"service"`
+		Kind    string            `json:"kind"`
+		Binary  []byte            `json:"binary"`
+		Files   map[string][]byte `json:"files"`
+		Restart bool              `json:"restart"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Service == "" || (request.Kind != "binary" && request.Kind != "files") {
+		http.Error(w, "service and supported artifact kind are required", http.StatusBadRequest)
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := -1
+	for i := range a.config.Services {
+		if a.config.Services[i].Name == request.Service {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		http.Error(w, "unknown service "+request.Service, http.StatusNotFound)
+		return
+	}
+	if request.Kind == "binary" {
+		if len(request.Binary) == 0 {
+			http.Error(w, "binary is empty", http.StatusBadRequest)
+			return
+		}
+		path := filepath.Join("/run/incidentsim/artifacts", request.Service)
+		if err := atomicWrite(path, request.Binary, 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.config.Services[index].Command = []string{path}
+	} else {
+		for name, content := range request.Files {
+			if filepath.IsAbs(name) || strings.Contains(filepath.Clean(name), "..") {
+				http.Error(w, "invalid artifact file "+name, http.StatusBadRequest)
+				return
+			}
+			if err := atomicWrite(filepath.Join("/run/incidentsim/files", name), content, 0o600); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+	if err := saveConfig(a.configPathOrDefault(), a.config); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if request.Restart {
+		if err := a.startLocked(a.config.Services[index]); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"deployed": request.Service})
+}
+
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // handleExec runs a command inside the guest. It is the only way the core can

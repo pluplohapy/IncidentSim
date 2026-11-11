@@ -118,6 +118,21 @@ type Drive struct {
 	IsReadOnly   bool   `json:"is_read_only"`
 }
 
+// VsockDevice exposes a guest AF_VSOCK port through a host Unix socket. The
+// host speaks the Firecracker CONNECT protocol over UDS; Go's standard library
+// has no "vsock" network.
+type VsockDevice struct {
+	GuestCID uint32 `json:"guest_cid"`
+	UDSPath  string `json:"uds_path"`
+}
+
+// NetworkInterface attaches a tap device to a guest network interface.
+type NetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+	GuestMAC    string `json:"guest_mac"`
+}
+
 // InstanceAction is the PUT /actions body used to start a VM.
 type InstanceAction struct {
 	ActionType string `json:"action_type"`
@@ -154,6 +169,16 @@ func (a *API) AddDrive(ctx context.Context, drive Drive) error {
 	return a.put(ctx, "/drives/"+drive.DriveID, drive)
 }
 
+// AddVsock configures the UDS bridge used by the host to reach the agent.
+func (a *API) AddVsock(ctx context.Context, device VsockDevice) error {
+	return a.put(ctx, "/vsock", device)
+}
+
+// AddNetworkInterface attaches a tap device before the VM starts.
+func (a *API) AddNetworkInterface(ctx context.Context, device NetworkInterface) error {
+	return a.put(ctx, "/network-interfaces/"+device.IfaceID, device)
+}
+
 // Start boots the guest.
 func (a *API) Start(ctx context.Context) error {
 	return a.put(ctx, "/actions", InstanceAction{ActionType: "InstanceStart"})
@@ -181,33 +206,36 @@ func (a *API) CreateSnapshot(ctx context.Context, snapshot SnapshotCreate) error
 	return a.put(ctx, "/snapshot/create", snapshot)
 }
 
-// Resume restores a snapshot. Restoring rather than booting is what makes a
-// task reset take milliseconds instead of seconds.
-func (a *API) Resume(ctx context.Context, snapshot SnapshotResume) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, "http://localhost/snapshot/resume", nil)
+// LoadSnapshot restores a snapshot. Firecracker exposes restore as PUT
+// /snapshot/load; it is not a synthetic "/snapshot/resume" endpoint.
+func (a *API) LoadSnapshot(ctx context.Context, snapshot SnapshotResume) error {
+	return a.put(ctx, "/snapshot/load", snapshot)
+}
+
+// SetVMState pauses or resumes a VM through PATCH /vm.
+func (a *API) SetVMState(ctx context.Context, state string) error {
+	payload, err := json.Marshal(map[string]string{"state": state})
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(snapshot)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, "http://localhost/vm", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
-	req.Body = io.NopCloser(bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client().Do(req)
 	if err != nil {
-		return fmt.Errorf("firecracker resume: %w", err)
+		return fmt.Errorf("firecracker set VM state: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("firecracker resume: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("firecracker set VM state: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
 
-// Pause stops the VM without releasing it, so a snapshot can be taken of a
-// consistent state.
+// Pause stops a VM without releasing it.
 func (a *API) Pause(ctx context.Context) error {
-	return a.put(ctx, "/actions", InstanceAction{ActionType: "Pause"})
+	return a.SetVMState(ctx, "Paused")
 }
