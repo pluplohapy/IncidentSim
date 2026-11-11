@@ -165,6 +165,10 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	orchestrator.Builder = &core.GoBuilder{
+		Image:      "golang:1.24-alpine",
+		BuildCache: "incidentsim-go-build-cache",
+	}
 	// Session audit is optional: a missing Teleport degrades to a stub and a
 	// broken one is a warning in the journal.
 	orchestrator.Audit = teleport.FromConfig(teleport.Config{

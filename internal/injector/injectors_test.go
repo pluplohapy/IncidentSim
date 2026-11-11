@@ -76,6 +76,9 @@ func (f fakeRuntime) Reset(ctx context.Context, id string) (*runtime.Instance, e
 func (f fakeRuntime) Apply(ctx context.Context, id string, patch runtime.EnvPatch) (*runtime.Instance, error) {
 	return nil, nil
 }
+func (f fakeRuntime) Deploy(ctx context.Context, id string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
+	return nil, nil
+}
 
 func TestFeatureFlagInjectorSetsEnvironment(t *testing.T) {
 	injector := NewFeatureFlagInjector()

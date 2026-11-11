@@ -128,6 +128,18 @@ func (f *FakeAdapter) Apply(ctx context.Context, sessionID string, patch EnvPatc
 	return &out, nil
 }
 
+func (f *FakeAdapter) Deploy(ctx context.Context, sessionID string, art Artifact, restart bool) (*Instance, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, fmt.Sprintf("Deploy:%s:%s", art.Service, art.Kind))
+	if f.FailWith != nil {
+		return nil, f.FailWith
+	}
+	out := *f.Instance
+	out.Services = append([]Service(nil), f.Instance.Services...)
+	return &out, nil
+}
+
 // AppliedPatches returns the patches seen by Apply, oldest first.
 func (f *FakeAdapter) AppliedPatches() []EnvPatch {
 	f.mu.Lock()

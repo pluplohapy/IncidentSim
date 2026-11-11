@@ -76,6 +76,36 @@ type EnvPatch struct {
 	Image string
 }
 
+// Artifact is a deployable unit produced by a Builder or prepared from the
+// participant's workspace. Kind is "binary" (a compiled service binary) or
+// "files" (configuration or other static files). Deploy installs it into the
+// running environment and, when restart is true, recreates/restarts the
+// service so it picks the artifact up.
+type Artifact struct {
+	// Service is the service the artifact belongs to.
+	Service string
+	// Kind is "binary" or "files".
+	Kind string
+	// Path is the host path of a binary artifact (Kind == "binary").
+	Path string
+	// Files are the file contents to install (Kind == "files"), keyed by the
+	// destination path inside the service.
+	Files map[string][]byte
+	// Digest is the content digest of the artifact, used to detect no-op
+	// redeploys and to journal what was deployed.
+	Digest string
+}
+
+// Builder builds a task workspace into a deployable artifact. It is engine
+// agnostic: the same GoBuilder works for compose and Firecracker because the
+// produced binary targets Linux.
+type Builder interface {
+	// Build compiles the workspace at workspaceDir into an Artifact. On
+	// failure it returns the compiler output so the participant can see it,
+	// and the running environment must be left untouched.
+	Build(ctx context.Context, workspaceDir string) (*Artifact, error)
+}
+
 // ExecRequest asks a service to run a command.
 type ExecRequest struct {
 	Service string
@@ -171,6 +201,13 @@ type Adapter interface {
 	// returns the refreshed instance for the same reason: recreating a
 	// service can change where it is reachable from.
 	Apply(ctx context.Context, sessionID string, patch EnvPatch) (*Instance, error)
+
+	// Deploy pushes an artifact into a running environment. It replaces the
+	// per-kind logic that used to live in EnvPatch (Files/Image): a binary
+	// artifact is installed as the service executable, a files artifact is
+	// installed as configuration. restart recreates the service so the
+	// artifact takes effect.
+	Deploy(ctx context.Context, sessionID string, a Artifact, restart bool) (*Instance, error)
 }
 
 // Spec is the manifest view an adapter needs to build an environment. It is a

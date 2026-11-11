@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -391,6 +392,109 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 		return nil, err
 	}
 	return a.describe(project), nil
+}
+
+// Deploy installs an artifact into the running compose project.
+//
+// Kind=binary: the artifact carries a pre-built Linux binary produced by the
+// Builder. A thin image is built from it (the binary is copied in, the
+// service's environment and command come from the compose spec), the service
+// image is updated and the container is recreated.
+// Kind=files: the files are written into the project's config directory and
+// the service is restarted so it reloads them.
+func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
+	project, err := a.session(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	switch art.Kind {
+	case "binary":
+		tag, err := a.buildBinaryImage(ctx, project, art)
+		if err != nil {
+			return nil, err
+		}
+		for i := range project.spec.Services {
+			if project.spec.Services[i].Name == art.Service {
+				project.spec.Services[i].Image = tag
+				break
+			}
+		}
+		if err := a.writeComposeFile(project); err != nil {
+			return nil, err
+		}
+		if restart {
+			if err := project.client.Restart(ctx, art.Service); err != nil {
+				return nil, err
+			}
+		}
+		if err := a.resolveVerifiedPorts(ctx, project); err != nil {
+			return nil, err
+		}
+		return a.describe(project), nil
+	case "files":
+		for path, content := range art.Files {
+			hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(path))
+			if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(hostPath, content, 0o600); err != nil {
+				return nil, fmt.Errorf("write %s: %w", path, err)
+			}
+		}
+		if restart {
+			if err := project.client.Restart(ctx, art.Service); err != nil {
+				return nil, err
+			}
+		}
+		if err := a.resolveVerifiedPorts(ctx, project); err != nil {
+			return nil, err
+		}
+		return a.describe(project), nil
+	default:
+		return nil, fmt.Errorf("unknown artifact kind %q", art.Kind)
+	}
+}
+
+// buildBinaryImage builds a thin image from the artifact's binary and returns
+// its tag. The Dockerfile copies the binary into the image; environment and
+// command are supplied by the compose service spec at runtime.
+func (a *Adapter) buildBinaryImage(ctx context.Context, project *session, art runtime.Artifact) (string, error) {
+	if art.Path == "" {
+		return "", fmt.Errorf("binary artifact %q has no path", art.Service)
+	}
+	dir, err := os.MkdirTemp("", "incidentsim-binary-*")
+	if err != nil {
+		return "", fmt.Errorf("create build dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Copy the binary into the build context.
+	binaryData, err := os.ReadFile(art.Path)
+	if err != nil {
+		return "", fmt.Errorf("read binary %s: %w", art.Path, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app"), binaryData, 0o755); err != nil {
+		return "", fmt.Errorf("write binary: %w", err)
+	}
+	// Detect the host Go arch so the binary runs inside the container Docker
+	// can execute (linux/amd64 on amd64 hosts, linux/arm64 on Apple Silicon).
+	goarch, _ := exec.Command("go", "env", "GOARCH").Output()
+	arch := strings.TrimSpace(string(goarch))
+	if arch == "" {
+		arch = "amd64"
+	}
+	dockerfile := fmt.Sprintf("FROM alpine:3.20\nCOPY app /usr/local/bin/app\nENTRYPOINT [\"/usr/local/bin/app\"]\n")
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		return "", fmt.Errorf("write Dockerfile: %w", err)
+	}
+	tag := fmt.Sprintf("incidentsim/workload:session-%s", project.id)
+	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/"+arch, "-t", tag, dir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("docker build: %w: %s", err, string(out))
+	}
+	return tag, nil
 }
 
 // resolveVerifiedPorts resolves ports and confirms each endpoint answers. A

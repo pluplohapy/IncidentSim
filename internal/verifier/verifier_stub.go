@@ -91,5 +91,10 @@ func (f FakeEnvironment) Apply(ctx context.Context, sessionID string, patch runt
 	return nil, runtime.ErrUnsupported
 }
 
+// Deploy implements runtime.Adapter.
+func (f FakeEnvironment) Deploy(ctx context.Context, sessionID string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
+	return nil, runtime.ErrUnsupported
+}
+
 var _ Environment = FakeEnvironment{}
 var _ runtime.Adapter = FakeEnvironment{}

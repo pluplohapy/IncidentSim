@@ -43,6 +43,11 @@ type Orchestrator struct {
 	// warning, never a failed session.
 	Audit AuditRecorder
 
+	// Builder compiles a code-level workspace into a deployable artifact. It
+	// is set by the deployment (cmd/incidentsim serve) and is required for
+	// code-level tasks.
+	Builder runtime.Builder
+
 	mu sync.Mutex
 	// sequence keeps session ids monotonic inside a process.
 	sequence int
@@ -438,6 +443,18 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 }
 
 // Apply pushes a participant fix into the environment.
+//
+// Two paths:
+//
+//   - patch.Files set: the internal --file/--content API. Files are written
+//     into the session workspace, then the workspace is deployed exactly as
+//     the no-files path below.
+//   - patch.Files empty: `incidentsim apply <session>` picks up the current
+//     state of the session workspace, validates it, builds it (code level) or
+//     deploys it (config/db level), and restarts the service.
+//
+// A build failure returns the compiler output to the participant and leaves
+// the running environment untouched.
 func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) error {
 	if err := o.beginOp(sessionID); err != nil {
 		return err
@@ -453,70 +470,27 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 		return err
 	}
 
-	// Write files into the session workspace before rebuilding.
+	// Write files carried by the patch into the session workspace first.
+	workspaceMode := false
 	if len(patch.Files) > 0 {
-		// Path traversal is a security boundary: reject before anything is
-		// written so no change is applied on a violation.
-		for relPath := range patch.Files {
-			if err := validateFilePath(relPath); err != nil {
-				return fmt.Errorf("invalid file path %q: %w", relPath, err)
-			}
+		if err := o.writePatchFiles(session, patch); err != nil {
+			return err
 		}
-
-		// Only files listed in spec.editable may be changed. Dockerfile,
-		// go.mod and go.sum are editable only when the manifest lists them.
-		allowed := make(map[string]bool)
-		for _, e := range session.manifest.Spec.Editable {
-			allowed[e] = true
-		}
-		for relPath := range patch.Files {
-			if !allowed[relPath] {
-				return fmt.Errorf("file %q is not in editable list %v", relPath, session.manifest.Spec.Editable)
-			}
-		}
-
-		if session.WorkspaceDir == "" {
-			return fmt.Errorf("no workspace for session %s", session.ID)
-		}
-
-		// Validate workspace integrity against the scenario before any write:
-		// a changed, added or deleted file outside editable is rejected and the
-		// workspace is left untouched.
-		if err := o.validateEditableFiles(session); err != nil {
-			return fmt.Errorf("editable validation: %w", err)
-		}
-
-		session.journal.Record(EventApplyStarted, "apply started", map[string]any{
-			"service": patch.Service,
-			"files":   patch.Files,
-		})
-
-		for relPath, content := range patch.Files {
-			target := filepath.Join(session.WorkspaceDir, relPath)
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return fmt.Errorf("create dir for %s: %w", relPath, err)
-			}
-			if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-				return fmt.Errorf("write %s: %w", relPath, err)
-			}
-		}
-
-		// Only a code-level fix needs a rebuilt image. A config-level or
-		// composite task edits a mounted config file; the adapter writes it into
-		// the compose project and recreates the service. Rebuilding here would
-		// fail because a config workspace has no Dockerfile.
-		if session.manifest.Metadata.Level == manifest.LevelCode {
-			imageTag, err := o.buildWorkspaceImage(ctx, session)
-			if err != nil {
-				return fmt.Errorf("build workspace image: %w", err)
-			}
-			patch.Image = imageTag
-			// Files have been written to the workspace and baked into the image;
-			// don't send them again to the adapter.
-			patch.Files = nil
-		}
+		workspaceMode = true
 	}
 
+	// A session without a workspace (e.g. a config-level task whose fix is
+	// purely env vars) takes the direct vars/command path. Anything else
+	// applies from the current workspace state.
+	if len(patch.Vars) == 0 && len(patch.Command) == 0 && session.WorkspaceDir != "" {
+		workspaceMode = true
+	}
+
+	if workspaceMode {
+		return o.applyFromWorkspace(ctx, session, adapter, patch)
+	}
+
+	// Direct vars/command path: no workspace involved.
 	instance, err := adapter.Apply(ctx, session.ID, patch)
 	if err != nil {
 		session.journal.Record(EventFixFailed, "fix could not be applied", map[string]any{
@@ -530,18 +504,234 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 	session.mu.Lock()
 	session.AppliedFixes = append(session.AppliedFixes, patch)
 	session.mu.Unlock()
-	if patch.Image != "" {
-		session.journal.Record(EventServiceRecreated, "service recreated with new image", map[string]any{
-			"service": patch.Service,
-			"image":   patch.Image,
-		})
-	}
 	session.journal.Record(EventFixApplied, "participant applied a change", map[string]any{
 		"service": patch.Service,
 		"vars":    patch.Vars,
 		"restart": patch.Restart,
 	})
 	return nil
+}
+
+// writePatchFiles writes the files carried by a patch into the session
+// workspace, rejecting path traversal and non-editable files before anything
+// is written.
+func (o *Orchestrator) writePatchFiles(session *Session, patch runtime.EnvPatch) error {
+	for relPath := range patch.Files {
+		if err := validateFilePath(relPath); err != nil {
+			return fmt.Errorf("invalid file path %q: %w", relPath, err)
+		}
+	}
+	allowed := make(map[string]bool)
+	for _, e := range session.manifest.Spec.Editable {
+		allowed[e] = true
+	}
+	for relPath := range patch.Files {
+		if !allowed[relPath] {
+			return fmt.Errorf("file %q is not in editable list %v", relPath, session.manifest.Spec.Editable)
+		}
+	}
+	for relPath, content := range patch.Files {
+		target := filepath.Join(session.WorkspaceDir, relPath)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create dir for %s: %w", relPath, err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", relPath, err)
+		}
+	}
+	return nil
+}
+
+// applyFromWorkspace validates, builds/deploys and restarts the service from
+// the current state of the session workspace.
+func (o *Orchestrator) applyFromWorkspace(ctx context.Context, session *Session, adapter runtime.Adapter, patch runtime.EnvPatch) error {
+	// Validate workspace integrity against the scenario: a changed, added or
+	// deleted file outside spec.editable is rejected and the workspace is left
+	// untouched.
+	if err := o.validateEditableFiles(session); err != nil {
+		return fmt.Errorf("editable validation: %w", err)
+	}
+
+	// Journal the unified diff of the workspace against the scenario (not the
+	// full contents).
+	if err := o.journalWorkspaceDiff(session); err != nil {
+		return fmt.Errorf("workspace diff: %w", err)
+	}
+
+	session.journal.Record(EventApplyStarted, "apply started", map[string]any{
+		"service": patch.Service,
+		"level":   session.manifest.Metadata.Level,
+	})
+
+	switch session.manifest.Metadata.Level {
+	case manifest.LevelCode:
+		if o.Builder == nil {
+			return fmt.Errorf("no builder configured for code-level task %s", session.TaskID)
+		}
+		artifact, err := o.Builder.Build(ctx, session.WorkspaceDir)
+		if err != nil {
+			// Build failure: return the compiler output, do not touch the
+			// running environment.
+			session.journal.Record(EventBuildFailed, "build failed", map[string]any{"error": err.Error()})
+			return fmt.Errorf("build workspace: %w", err)
+		}
+		session.journal.Record(EventBuildOK, "build ok", map[string]any{
+			"service": artifact.Service,
+			"digest":  artifact.Digest,
+		})
+		instance, err := adapter.Deploy(ctx, session.ID, *artifact, true)
+		if err != nil {
+			session.journal.Record(EventFixFailed, "deploy failed", map[string]any{"error": err.Error()})
+			return fmt.Errorf("deploy: %w", err)
+		}
+		o.refreshInstance(session, instance)
+		if err := o.waitForHealth(ctx, session, adapter); err != nil {
+			return fmt.Errorf("service not healthy after deploy: %w", err)
+		}
+	case manifest.LevelConfig:
+		// Config files are deployed as-is; there is no build.
+		artifact, err := o.configArtifact(session)
+		if err != nil {
+			return fmt.Errorf("config artifact: %w", err)
+		}
+		instance, err := adapter.Deploy(ctx, session.ID, artifact, true)
+		if err != nil {
+			session.journal.Record(EventFixFailed, "deploy failed", map[string]any{"error": err.Error()})
+			return fmt.Errorf("deploy: %w", err)
+		}
+		o.refreshInstance(session, instance)
+		if err := o.waitForHealth(ctx, session, adapter); err != nil {
+			return fmt.Errorf("service not healthy after deploy: %w", err)
+		}
+	case manifest.LevelDB:
+		if len(patch.Command) == 0 {
+			return fmt.Errorf("db-level apply requires a SQL statement")
+		}
+		if _, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+			Service: patch.Service,
+			Command: patch.Command,
+		}); err != nil {
+			session.journal.Record(EventFixFailed, "statement failed", map[string]any{"error": err.Error()})
+			return fmt.Errorf("sql: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported level %q for apply", session.manifest.Metadata.Level)
+	}
+
+	session.mu.Lock()
+	session.AppliedFixes = append(session.AppliedFixes, patch)
+	session.mu.Unlock()
+	session.journal.Record(EventServiceRecreated, "service recreated", map[string]any{
+		"service": patch.Service,
+	})
+	session.journal.Record(EventFixApplied, "participant applied a change", map[string]any{
+		"service": patch.Service,
+		"vars":    patch.Vars,
+		"restart": patch.Restart,
+	})
+	return nil
+}
+
+// configArtifact builds a Kind=files artifact from the session workspace, so
+// config-level tasks deploy the files the service actually loads.
+func (o *Orchestrator) configArtifact(session *Session) (runtime.Artifact, error) {
+	artifact := runtime.Artifact{Service: "app", Kind: "files", Files: map[string][]byte{}}
+	err := filepath.WalkDir(session.WorkspaceDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(session.WorkspaceDir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		artifact.Files[rel] = data
+		return nil
+	})
+	return artifact, err
+}
+
+// journalWorkspaceDiff records a unified diff of the session workspace against
+// the scenario workspace, so the journal shows what changed rather than the
+// full contents of every file.
+func (o *Orchestrator) journalWorkspaceDiff(session *Session) error {
+	src := o.scenarioWorkspaceDir(session)
+	dst := session.WorkspaceDir
+	if src == "" || dst == "" {
+		return nil
+	}
+	var diff strings.Builder
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		scenarioData, serr := os.ReadFile(path)
+		dstData, derr := os.ReadFile(filepath.Join(dst, rel))
+		switch {
+		case serr != nil:
+			// file exists in scenario but not in workspace: deletion
+			fmt.Fprintf(&diff, "--- %s\n+++ /dev/null\n- %s\n", rel, string(scenarioData))
+		case derr != nil:
+			// file exists in workspace but not in scenario: addition
+			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n+ %s\n", rel, string(scenarioData))
+		default:
+			if bytes.Equal(scenarioData, dstData) {
+				return nil
+			}
+			fmt.Fprintf(&diff, "--- %s\n+++ %s\n@@\n- %s\n+ %s\n", rel, rel, string(scenarioData), string(dstData))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Also report files added in the workspace that are not in the scenario.
+	err = filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dst, path)
+		if err != nil {
+			return err
+		}
+		if _, serr := os.ReadFile(filepath.Join(src, rel)); serr != nil {
+			data, derr := os.ReadFile(path)
+			if derr != nil {
+				return derr
+			}
+			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n+ %s\n", rel, string(data))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if diff.Len() == 0 {
+		return nil
+	}
+	session.journal.Record(EventApplyStarted, "workspace diff", map[string]any{
+		"diff": diff.String(),
+	})
+	return nil
+}
+
+// waitForHealth waits until every service of the session answers its
+// healthcheck, then refreshes the instance so endpoints are current.
+func (o *Orchestrator) waitForHealth(ctx context.Context, session *Session, adapter runtime.Adapter) error {
+	session.mu.Lock()
+	instance := session.instance
+	session.mu.Unlock()
+	if instance == nil {
+		return fmt.Errorf("no instance for session %s", session.ID)
+	}
+	return runtime.WaitForHealth(ctx, instance, runtime.DefaultResetTimeout)
 }
 
 // Exec runs an arbitrary command inside a service of a session.

@@ -419,6 +419,16 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 	return a.describe(machine), nil
 }
 
+// Deploy installs an artifact into the Firecracker guest. The implementation
+// is finalised in H1; until then it reports unsupported so the interface is
+// satisfied everywhere.
+func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
+	if _, err := a.machine(sessionID); err != nil {
+		return nil, err
+	}
+	return nil, runtime.ErrUnsupported
+}
+
 // Exec implements runtime.Adapter through the guest agent.
 func (a *Adapter) Exec(ctx context.Context, sessionID string, req runtime.ExecRequest) (runtime.ExecResult, error) {
 	machine, err := a.machine(sessionID)
