@@ -112,7 +112,7 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 	return json.Unmarshal(payload, out)
 }
 
-// Show lists the catalog, or dumps one task with its symptoms and theory.
+// Show lists the catalog, or dumps the public view of one task.
 func (c *Client) Show(ctx context.Context, taskID string) error {
 	if taskID == "" {
 		var response struct {
@@ -144,12 +144,12 @@ func (c *Client) Show(ctx context.Context, taskID string) error {
 	}
 
 	var task struct {
-		ID        string             `json:"id"`
-		Title     string             `json:"title"`
-		Level     string             `json:"level"`
-		Symptoms  []manifest.Symptom `json:"symptoms"`
-		RootCause string             `json:"root_cause"`
-		Theory    string             `json:"theory"`
+		ID       string             `json:"id"`
+		Title    string             `json:"title"`
+		Level    string             `json:"level"`
+		Symptoms []manifest.Symptom `json:"symptoms"`
+		Editable []string           `json:"editable"`
+		Minutes  int                `json:"estimated_minutes"`
 	}
 	if err := c.Get(ctx, "/api/v1/tasks/"+taskID, &task); err != nil {
 		return err
@@ -159,7 +159,15 @@ func (c *Client) Show(ctx context.Context, taskID string) error {
 	for _, symptom := range task.Symptoms {
 		fmt.Fprintf(c.Out, "  • %s: %s\n", symptom.ID, symptom.Observation)
 	}
-	fmt.Fprintf(c.Out, "\n%s\n", task.Theory)
+	if len(task.Editable) > 0 {
+		fmt.Fprintln(c.Out, "Редактируемые файлы:")
+		for _, file := range task.Editable {
+			fmt.Fprintf(c.Out, "  • %s\n", file)
+		}
+	}
+	if task.Minutes > 0 {
+		fmt.Fprintf(c.Out, "Оценка: %d мин.\n", task.Minutes)
+	}
 	return nil
 }
 

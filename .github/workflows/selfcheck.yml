@@ -8,47 +8,67 @@ on:
   workflow_dispatch:
 
 jobs:
-  selfcheck:
+  catalog:
     runs-on: ubuntu-latest
+    outputs:
+      tasks: ${{ steps.tasks.outputs.tasks }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
-
-      - name: Build workload image
-        run: docker build -t incidentsim/workload:dev -f build/workload.Dockerfile .
-
-      - name: Build incidentsim
-        run: mkdir -p bin && go build -o bin/incidentsim ./cmd/incidentsim
-
-      - name: Start incidentsim core
+      - run: go build -o bin/incidentsim ./cmd/incidentsim
+      - name: Start core and enumerate task ids
+        id: tasks
         env:
-          INCIDENTSIM_ADDR: http://127.0.0.1:8747
+          INCIDENTSIM_ADMIN: '1'
         run: |
           ./bin/incidentsim serve > /tmp/serve.log 2>&1 &
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 50); do
+            curl -fsS http://127.0.0.1:8747/healthz && break
+            sleep 0.2
+          done
+          ids=$(./bin/incidentsim list --ids | jq -Rsc 'split("\n") | map(select(length > 0))')
+          test "$ids" != '[]'
+          echo "tasks=$ids" >> "$GITHUB_OUTPUT"
+
+  selfcheck:
+    needs: catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        task: ${{ fromJSON(needs.catalog.outputs.tasks) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.task }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.task }}-
+      - run: go build -o bin/incidentsim ./cmd/incidentsim
+      - name: Start core
+        env:
+          INCIDENTSIM_ADMIN: '1'
+        run: |
+          ./bin/incidentsim serve > /tmp/serve.log 2>&1 &
+          for _ in $(seq 1 50); do
             curl -fsS http://127.0.0.1:8747/healthz && break
             sleep 0.2
           done
           curl -fsS http://127.0.0.1:8747/healthz || { cat /tmp/serve.log; exit 1; }
-
-      - name: Run selfcheck for every task
+      - name: Selfcheck
         env:
-          INCIDENTSIM_ADDR: http://127.0.0.1:8747
-        run: |
-          tasks=$(./bin/incidentsim show | tail -n +2 | awk '{print $1}')
-          count=$(printf '%s\n' "$tasks" | wc -l)
-          [ "$count" -ge 4 ] || { echo "expected at least 4 tasks, got $count"; exit 1; }
-          for task in $tasks; do
-            echo "=== selfcheck $task ==="
-            ./bin/incidentsim selfcheck "$task" || exit 1
-          done
-
+          INCIDENTSIM_ADMIN: '1'
+        run: ./bin/incidentsim selfcheck "${{ matrix.task }}"
       - name: Validate manifests
-        env:
-          INCIDENTSIM_ADDR: http://127.0.0.1:8747
         run: ./bin/incidentsim validate manifests

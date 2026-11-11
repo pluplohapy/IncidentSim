@@ -44,6 +44,8 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "list":
+		return listCmd(args[1:])
 	case "serve":
 		return serve(args[1:])
 	case "show":
@@ -107,7 +109,8 @@ func usage() {
 
 Использование:
   incidentsim serve [--config incidentsim.yaml] [--addr host:port]   запустить ядро (HTTP API)
-  incidentsim show [task]                                          список задач или одна задача (только публичное)
+  incidentsim list [--ids]                                        каталог задач
+  incidentsim show <task>                                         публичная карточка задачи
   incidentsim start <task>                                         поднять окружение и активировать сбой
   incidentsim status <session>                                     состояние сессии
   incidentsim logs <session> [--service app] [--grep текст] [--tail N]  логи сервиса
@@ -235,6 +238,33 @@ func showCmd(args []string) error {
 		return c.Show(context.Background(), "")
 	}
 	return c.Show(context.Background(), fs.Arg(0))
+}
+
+func listCmd(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	ids := fs.Bool("ids", false, "вывести только идентификаторы задач")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("list does not accept positional arguments")
+	}
+	if !*ids {
+		return client(nil).Show(context.Background(), "")
+	}
+	var response struct {
+		Tasks []struct {
+			ID string `json:"id"`
+		} `json:"tasks"`
+	}
+	c := client(nil)
+	if err := c.Get(context.Background(), "/api/v1/tasks", &response); err != nil {
+		return err
+	}
+	for _, task := range response.Tasks {
+		fmt.Fprintln(c.Out, task.ID)
+	}
+	return nil
 }
 
 func startCmd(args []string) error {
