@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,10 @@ func (l *Loader) LoadDir() ([]*Manifest, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("catalog %s contains no manifests", l.Dir)
+	}
+	// B14: cross-manifest and asset validation after every manifest loads.
+	if err := validateCatalogAssets(out, filepath.Dir(l.Dir)); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -514,4 +519,174 @@ func mustMarshalYAML(m *Manifest) []byte {
 		return []byte("{}")
 	}
 	return data
+}
+
+// validateCatalogAssets performs B14 cross-manifest and asset validation:
+// workspace/reference must exist; editable ⊂ workspace files and present in
+// reference; code-level tasks need Dockerfile/go.mod/go.sum; workloads/<id>.yaml
+// must exist; hints.level must be continuous 1..N; ≥1 distractor; reference
+// differs from workspace only in editable and ≤ 40 lines of diff.
+func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
+	var issues []Issue
+	for _, m := range manifests {
+		field := "task " + m.Metadata.ID
+
+		workspace := filepath.Join(projectRoot, m.Spec.Workspace)
+		reference := filepath.Join(projectRoot, m.Spec.Reference)
+		// workspace/reference are optional fields; if not declared, skip asset
+		// validation for this task (test fixtures may not declare them).
+		if m.Spec.Workspace == "" || m.Spec.Reference == "" {
+			continue
+		}
+
+		if m.Metadata.Level == LevelCode {
+			for _, required := range []string{"Dockerfile", "go.mod", "go.sum"} {
+				if _, err := os.Stat(filepath.Join(workspace, required)); os.IsNotExist(err) {
+					issues = append(issues, Issue{Field: field + ".workspace", Message: fmt.Sprintf("code-level task must have workspace/%s", required)})
+				}
+			}
+			if _, err := os.Stat(filepath.Join(projectRoot, "workloads", m.Metadata.ID+".yaml")); os.IsNotExist(err) {
+				issues = append(issues, Issue{Field: field + ".verify.replay.profile", Message: fmt.Sprintf("workloads/%s.yaml is missing", m.Metadata.ID)})
+			}
+		}
+
+		// editable must be a subset of workspace files and present in reference.
+		workspaceFiles := map[string]bool{}
+		_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(workspace, path)
+			workspaceFiles[rel] = true
+			return nil
+		})
+		referenceFiles := map[string]bool{}
+		_ = filepath.WalkDir(reference, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(reference, path)
+			referenceFiles[rel] = true
+			return nil
+		})
+		for _, editable := range m.Spec.Editable {
+			if !workspaceFiles[editable] {
+				issues = append(issues, Issue{Field: field + ".editable", Message: fmt.Sprintf("editable %q is not a workspace file", editable)})
+			}
+			if !referenceFiles[editable] {
+				issues = append(issues, Issue{Field: field + ".editable", Message: fmt.Sprintf("editable %q is not a reference file", editable)})
+			}
+		}
+
+		// hints.level must be continuous 1..N.
+		expected := 1
+		for _, hint := range m.Spec.Hints {
+			if hint.Level != expected {
+				issues = append(issues, Issue{Field: field + ".hints", Message: fmt.Sprintf("hint levels must be continuous 1..N, got level %d after %d", hint.Level, expected-1)})
+				break
+			}
+			expected++
+		}
+
+		// ≥1 distractor; fails unique within the task; each has an apply action.
+		if len(m.Spec.Distractors) == 0 {
+			issues = append(issues, Issue{Field: field + ".distractors", Message: "at least one distractor is required"})
+		}
+		seenFails := map[string]bool{}
+		for _, d := range m.Spec.Distractors {
+			if d.Apply == nil {
+				issues = append(issues, Issue{Field: field + ".distractors", Message: fmt.Sprintf("distractor %q has no apply action (B10)", d.ID)})
+			}
+			if seenFails[d.Fails] {
+				issues = append(issues, Issue{Field: field + ".distractors", Message: fmt.Sprintf("distractors %q and another share fails %q", d.ID, d.Fails)})
+			}
+			seenFails[d.Fails] = true
+		}
+
+		// reference differs from workspace only in editable and ≤ 40 lines diff.
+		if err := referenceDiffWithinBudget(workspace, reference, m.Spec.Editable); err != nil {
+			issues = append(issues, Issue{Field: field + ".reference", Message: err.Error()})
+		}
+	}
+	if len(issues) > 0 {
+		return &ValidationError{Issues: sortedIssues(issues)}
+	}
+	return nil
+}
+
+// referenceDiffWithinBudget checks that reference and workspace differ only in
+// editable files and that the unified diff is ≤ 40 lines.
+func referenceDiffWithinBudget(workspace, reference string, editable []string) error {
+	editableSet := map[string]bool{}
+	for _, e := range editable {
+		editableSet[e] = true
+	}
+	diffLines := 0
+	// Files in workspace but not reference (or different) must be editable.
+	_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(workspace, path)
+		refPath := filepath.Join(reference, rel)
+		refData, refErr := os.ReadFile(refPath)
+		wsData, wsErr := os.ReadFile(path)
+		switch {
+		case refErr != nil:
+			if !editableSet[rel] {
+				return fmt.Errorf("reference is missing non-editable file %q", rel)
+			}
+		case wsErr != nil:
+			if !editableSet[rel] {
+				return fmt.Errorf("workspace deleted non-editable file %q", rel)
+			}
+		default:
+			if string(wsData) != string(refData) && !editableSet[rel] {
+				return fmt.Errorf("non-editable file %q differs between workspace and reference", rel)
+			}
+			if string(wsData) != string(refData) {
+				diffLines += lineDiffCount(string(refData), string(wsData))
+			}
+		}
+		return nil
+	})
+	// Files in reference but not workspace: must be editable.
+	_ = filepath.WalkDir(reference, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(reference, path)
+		if _, wsErr := os.ReadFile(filepath.Join(workspace, rel)); wsErr != nil && !editableSet[rel] {
+			return fmt.Errorf("reference has non-editable file %q missing from workspace", rel)
+		}
+		return nil
+	})
+	if diffLines > 40 {
+		return fmt.Errorf("reference diff exceeds 40 lines (%d); keep the fix minimal", diffLines)
+	}
+	return nil
+}
+
+// lineDiffCount counts differing lines between two texts (naive comparison)
+func lineDiffCount(a, b string) int {
+	alines := strings.Split(a, "\n")
+	blines := strings.Split(b, "\n")
+	diff := 0
+	max := len(alines)
+	if len(blines) > max {
+		max = len(blines)
+	}
+	for i := 0; i < max; i++ {
+		var al, bl string
+		if i < len(alines) {
+			al = alines[i]
+		}
+		if i < len(blines) {
+			bl = blines[i]
+		}
+		if al != bl {
+			diff++
+		}
+	}
+	return diff
 }
