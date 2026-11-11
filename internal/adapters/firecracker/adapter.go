@@ -659,6 +659,14 @@ func createOverlay(path string) error {
 	if err := f.Truncate(512 << 20); err != nil {
 		return fmt.Errorf("size overlay: %w", err)
 	}
+	f.Close()
+	if _, err := exec.LookPath("mkfs.ext4"); err != nil {
+		return fmt.Errorf("%w: mkfs.ext4 is required to format the Firecracker overlay", runtime.ErrUnsupported)
+	}
+	cmd := exec.Command("mkfs.ext4", "-F", "-q", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("format overlay: %w: %s", err, strings.TrimSpace(string(output)))
+	}
 	return nil
 }
 
