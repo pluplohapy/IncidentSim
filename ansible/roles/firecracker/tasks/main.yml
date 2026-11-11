@@ -75,10 +75,3 @@
   args:
     - "incidentsim/workload:dev"
   tags: [rootfs]
-
-- name: Deploy the baseline snapshot
-  ansible.builtin.command:
-    cmd: incidentsim-guest --make-baseline --out {{ incidentsim_snapshot_dir }}/baseline.snap
-  args:
-    creates: "{{ incidentsim_snapshot_dir }}/baseline.snap"
-  tags: [snapshot]

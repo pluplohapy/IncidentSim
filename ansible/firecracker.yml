@@ -2,11 +2,10 @@
 # Provisioning a bare-metal Linux host for the Firecracker engine.
 #
 # The playbook installs Firecracker, creates the tap/bridge network the microVMs
-# use, installs the systemd units that own VM lifecycles, builds the rootfs
-# layers from the task images and deploys the baseline snapshot a reset
-# restores.
+# use, installs the systemd units that own VM lifecycles and builds the rootfs
+# layers from the task images.
 #
-# Run order matters: install → network → systemd → rootfs → snapshot.
+# Run order matters: install → network → systemd → rootfs.
 - name: Provision the IncidentSim Firecracker host
   hosts: incidentsim
   become: true
@@ -56,6 +55,7 @@
         url: "{{ incidentsim_firecracker_url }}"
         dest: "/tmp/firecracker-{{ incidentsim_firecracker_version }}.tgz"
         mode: "0644"
+        checksum: "{{ incidentsim_firecracker_checksum }}"
       tags: [firecracker]
 
     - name: Extract pinned Firecracker release
@@ -77,7 +77,6 @@
       args:
         creates: /usr/local/bin/firecracker
       tags: [firecracker]
-      tags: [firecracker]
 
     - name: Create the state directories
       ansible.builtin.file:
@@ -89,7 +88,6 @@
       loop:
         - "{{ incidentsim_state_dir }}"
         - "{{ incidentsim_rootfs_dir }}"
-        - "{{ incidentsim_snapshot_dir }}"
         - "{{ incidentsim_vm_dir }}"
       tags: [firecracker]
 
@@ -107,27 +105,12 @@
         append: true
       tags: [firecracker]
 
-    - name: Install the baseline provisioning unit
-      ansible.builtin.template:
-        src: templates/incidentsim-baseline.service.j2
-        dest: /etc/systemd/system/incidentsim-baseline.service
-        mode: "0644"
-      notify: Reload systemd
-      tags: [systemd]
-
     - name: Install the per-VM lifecycle unit template
       ansible.builtin.template:
         src: templates/incidentsim-vm@.service.j2
         dest: /etc/systemd/system/incidentsim-vm@.service
         mode: "0644"
       notify: Reload systemd
-      tags: [systemd]
-
-    - name: Enable the baseline unit
-      ansible.builtin.systemd:
-        name: incidentsim-baseline.service
-        enabled: true
-        state: started
       tags: [systemd]
 
   handlers:

@@ -568,6 +568,9 @@ func (v *ManifestVerifier) checkUnit(ctx context.Context, env Environment, check
 	defer cancel()
 	args := []string{
 		"run", "--rm", "--network", "none", "--read-only",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,size=128m",
+		"--tmpfs", "/root/.cache:rw,noexec,nosuid,size=256m",
 		"--memory", "512m", "--cpus", "1.0", "--pids-limit", "100",
 		"-v", tmp + ":/src:ro", "-w", "/src",
 		"golang:1.24-alpine", "go", "test", "-race", "./...",

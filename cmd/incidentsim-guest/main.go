@@ -63,6 +63,7 @@ type serviceProcess struct {
 	cmd  *exec.Cmd
 	logs *ringLog
 	env  map[string]string
+	port int
 	// done is closed by the single goroutine that waits for the process, so a
 	// restart never races the reaper by calling Wait twice.
 	done    chan struct{}
@@ -306,8 +307,7 @@ func (a *agent) handleEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRestart restarts a service with a patched environment. The config file
-// is updated first, because that is what makes the change survive a snapshot
-// restore.
+// is updated first, because that is what makes the change survive a reset.
 func (a *agent) handleRestart(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Service string            `json:"service"`
@@ -388,7 +388,32 @@ func (a *agent) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown service "+service, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"service": service, "env": proc.env, "started_at": proc.started})
+	if proc.port <= 0 {
+		http.Error(w, "service has no metrics port", http.StatusNotFound)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/metrics", proc.port), nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "scrape service metrics: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("service metrics status %d", resp.StatusCode), http.StatusBadGateway)
+		return
+	}
+	metrics, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"service": service, "metrics": string(metrics), "started_at": proc.started})
 }
 
 func (a *agent) start(service serviceConfig) error {
@@ -407,6 +432,7 @@ func (a *agent) startLocked(service serviceConfig) error {
 	proc := &serviceProcess{
 		logs:    newRingLog(5000),
 		env:     map[string]string{},
+		port:    service.Port,
 		done:    make(chan struct{}),
 		started: time.Now().UTC(),
 	}

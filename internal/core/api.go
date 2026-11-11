@@ -12,6 +12,7 @@ import (
 
 	"incidentsim/internal/manifest"
 	"incidentsim/internal/runtime"
+	"incidentsim/internal/verifier"
 )
 
 // apiError is the JSON error envelope of the core API.
@@ -164,6 +165,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, action, _ := strings.Cut(rest, "/")
+	// A stopped session is removed from the live registry, but its journal is
+	// intentionally retained so the participant can still fetch the gated
+	// postmortem after teardown.
+	if action == "postmortem" && r.Method == http.MethodGet {
+		if _, err := s.Orchestrator.Sessions.Get(id); err != nil {
+			s.handleArchivedPostmortem(w, r, id)
+			return
+		}
+	}
 	session, err := s.Orchestrator.Sessions.Get(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error(), "")
@@ -406,6 +416,37 @@ func (s *Server) handlePostmortem(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	postmortem, err := s.Orchestrator.GeneratePostmortem(session.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "")
+		return
+	}
+	if format := r.URL.Query().Get("format"); format == "md" || format == "markdown" {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, postmortem.Render())
+		return
+	}
+	writeJSON(w, http.StatusOK, postmortem)
+}
+
+func (s *Server) handleArchivedPostmortem(w http.ResponseWriter, r *http.Request, sessionID string) {
+	journal, err := LoadJournal(s.Orchestrator.Config.JournalDir(), sessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "")
+		return
+	}
+	allowed := false
+	for _, event := range journal.Events() {
+		if event.Type == EventGaveUp || (event.Type == EventVerifyRun && stringOf(event.Data["verdict"]) == verifier.VerdictPass) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "postmortem is available after a passing verification or an explicit give-up", "")
+		return
+	}
+	postmortem, err := s.Orchestrator.GeneratePostmortem(sessionID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error(), "")
 		return

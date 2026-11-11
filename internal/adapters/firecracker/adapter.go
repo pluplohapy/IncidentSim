@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +31,6 @@ type Config struct {
 	KernelImage string
 	// RootfsDir holds the per-task rootfs images.
 	RootfsDir string
-	// BaselineDir holds the baseline snapshots.
-	BaselineDir string
 	// GuestAgentPort is the vsock port the guest agent listens on.
 	GuestAgentPort uint32
 	// GuestIP and TapDevice expose guest service ports to core health/replay
@@ -50,7 +49,6 @@ func DefaultConfig() Config {
 		SocketDir:      "/var/lib/incidentsim/vms",
 		KernelImage:    "/var/lib/incidentsim/vmlinux",
 		RootfsDir:      "/var/lib/incidentsim/rootfs",
-		BaselineDir:    "/var/lib/incidentsim/snapshots",
 		GuestAgentPort: 51000,
 		GuestIP:        "172.30.0.2",
 		TapDevice:      "incidentsim-tap0",
@@ -81,7 +79,6 @@ type vm struct {
 	baseline runtime.Spec
 	rootfs   string
 	overlay  string
-	snapshot string
 	started  time.Time
 	ports    map[string]int
 	pid      int
@@ -145,16 +142,16 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	}
 	machine.rootfs = rootfs
 	machine.overlay = filepath.Join(machine.workdir, "overlay.ext4")
-	if err := createOverlay(machine.overlay); err != nil {
+	if err := a.writeGuestConfig(machine); err != nil {
+		return nil, err
+	}
+	if err := createOverlay(machine.overlay, filepath.Join(machine.workdir, "overlay-seed")); err != nil {
 		return nil, err
 	}
 	if err := a.launch(ctx, machine); err != nil {
 		return nil, err
 	}
 
-	if err := a.writeGuestConfig(machine); err != nil {
-		return nil, err
-	}
 	if err := a.start(ctx, machine); err != nil {
 		return nil, err
 	}
@@ -187,18 +184,15 @@ func (a *Adapter) available(ctx context.Context) error {
 // of a task. The layer is exported from the workload image, which is what makes
 // the same service work in compose and in a microVM.
 func (a *Adapter) ensureRootfs(ctx context.Context, machine *vm) (string, error) {
-	images := map[string]string{}
-	for _, service := range machine.spec.Services {
-		images[service.Name] = service.Image
+	if len(machine.spec.Services) == 0 {
+		return "", fmt.Errorf("%w: a Firecracker task needs at least one service", runtime.ErrUnsupported)
 	}
-	if len(images) != 1 {
-		// One rootfs per VM keeps the adapter simple: a task is one service
-		// plus, optionally, a database service the guest agent starts too.
-		return "", fmt.Errorf("%w: the firecracker engine supports exactly one rootfs image per VM", runtime.ErrUnsupported)
-	}
-	var image string
-	for _, value := range images {
-		image = value
+	// A task is one VM, not one VM per service. The rootfs is the shared stand
+	// image; the guest agent starts every declared service as a process from
+	// that image and keeps their configuration separate.
+	image := machine.spec.Services[0].Image
+	if image == "" {
+		return "", fmt.Errorf("rootfs image for service %q is empty", machine.spec.Services[0].Name)
 	}
 	rootfs := filepath.Join(a.Config.RootfsDir, sanitise(image)+".squashfs")
 	if _, err := os.Stat(rootfs); err == nil {
@@ -348,7 +342,11 @@ func (a *Adapter) writeGuestConfig(machine *vm) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(machine.workdir, "guest-config.json"), data, 0o600)
+	path := filepath.Join(machine.workdir, "overlay-seed", "run", "incidentsim", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // describe projects the VM into the runtime contract.
@@ -376,31 +374,38 @@ func (a *Adapter) describe(machine *vm) *runtime.Instance {
 	}
 }
 
-// Reset implements runtime.Adapter: it restores the baseline snapshot instead
-// of rebooting, which is what makes a reset fast enough to be part of a
-// session.
+// Reset implements runtime.Adapter by recreating the writable overlay and
+// rebooting the VM. Snapshot restore is intentionally not used: a snapshot is
+// coupled to its original disk, tap and vsock paths, so it cannot be a
+// per-session baseline without cloning the whole VM configuration.
 func (a *Adapter) Reset(ctx context.Context, sessionID string) (*runtime.Instance, error) {
 	machine, err := a.machine(sessionID)
 	if err != nil {
 		return nil, err
 	}
+	machine.spec = cloneSpec(machine.baseline)
 	if err := a.pauseOrKill(ctx, machine); err != nil {
 		return nil, err
 	}
-	snapshot := filepath.Join(a.Config.BaselineDir, machine.snapshotName())
-	if _, err := os.Stat(snapshot); err != nil {
-		return nil, fmt.Errorf("baseline snapshot %s is missing: run `make ansible-provision`", snapshot)
+	if err := os.Remove(machine.api.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove API socket: %w", err)
 	}
-	if err := machine.api.LoadSnapshot(ctx, SnapshotResume{
-		SnapshotPath:   snapshot,
-		MemFilePath:    snapshot + ".mem",
-		EnableDiffSnap: true,
-		ResumeVM:       true,
-	}); err != nil {
-		return nil, fmt.Errorf("restore snapshot: %w", err)
+	if err := os.Remove(machine.overlay); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove overlay: %w", err)
 	}
-	machine.spec = cloneSpec(machine.baseline)
+	if err := os.Remove(filepath.Join(machine.workdir, "vsock.sock")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove vsock socket: %w", err)
+	}
 	if err := a.writeGuestConfig(machine); err != nil {
+		return nil, err
+	}
+	if err := createOverlay(machine.overlay, filepath.Join(machine.workdir, "overlay-seed")); err != nil {
+		return nil, err
+	}
+	if err := a.launch(ctx, machine); err != nil {
+		return nil, err
+	}
+	if err := a.start(ctx, machine); err != nil {
 		return nil, err
 	}
 	if err := a.waitForAgent(ctx, machine); err != nil {
@@ -410,11 +415,16 @@ func (a *Adapter) Reset(ctx context.Context, sessionID string) (*runtime.Instanc
 	return a.describe(machine), nil
 }
 
-// pauseOrKill stops a VM so a snapshot restore can reopen its files.
+// pauseOrKill stops a VM so reset can recreate its per-session files safely.
 func (a *Adapter) pauseOrKill(ctx context.Context, machine *vm) error {
+	// Pause is best effort: a crashed VM has no state to pause. The adapter owns
+	// the process, so a reset/down always reaps it before reusing its paths.
 	_ = machine.api.Pause(ctx)
-	// Firecracker exits when its process is terminated; the adapter owns that
-	// process through the systemd unit.
+	if machine.process != nil && machine.process.Process != nil {
+		_ = machine.process.Process.Kill()
+		_, _ = machine.process.Process.Wait()
+		machine.process = nil
+	}
 	return nil
 }
 
@@ -470,9 +480,6 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 // is finalised in H1; until then it reports unsupported so the interface is
 // satisfied everywhere.
 func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
-	if _, err := a.machine(sessionID); err != nil {
-		return nil, err
-	}
 	machine, err := a.machine(sessionID)
 	if err != nil {
 		return nil, err
@@ -595,20 +602,63 @@ func (a *Adapter) Metrics(ctx context.Context, sessionID string, service string)
 		return nil, err
 	}
 	var response struct {
-		Env map[string]string `json:"env"`
+		Metrics string `json:"metrics"`
 	}
 	if err := readJSON(conn, &response); err != nil {
 		return nil, err
 	}
-	// The guest agent reports the environment of a service; the adapter does
-	// not invent metrics of its own.
-	sample := runtime.MetricSample{
-		Service: service,
-		Name:    "guest_service_env",
-		Labels:  response.Env,
-		At:      time.Now(),
+	samples := parsePrometheusMetrics(response.Metrics, service)
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("guest returned no Prometheus samples for %s", service)
 	}
-	return []runtime.MetricSample{sample}, nil
+	return samples, nil
+}
+
+func parsePrometheusMetrics(text, service string) []runtime.MetricSample {
+	var samples []runtime.MetricSample
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, labels, value, ok := parsePrometheusLine(line)
+		if !ok {
+			continue
+		}
+		samples = append(samples, runtime.MetricSample{Service: service, Name: name, Labels: labels, Value: value, At: time.Now()})
+	}
+	return samples
+}
+
+func parsePrometheusLine(line string) (string, map[string]string, float64, bool) {
+	rest := line
+	labels := map[string]string{}
+	if brace := strings.IndexByte(rest, '{'); brace >= 0 {
+		name := strings.TrimSpace(rest[:brace])
+		end := strings.LastIndexByte(rest, '}')
+		if name == "" || end < brace {
+			return "", nil, 0, false
+		}
+		for _, part := range strings.Split(rest[brace+1:end], ",") {
+			key, value, ok := strings.Cut(part, "=")
+			if ok {
+				labels[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), "\"")
+			}
+		}
+		rest = strings.TrimSpace(rest[end+1:])
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			return "", nil, 0, false
+		}
+		value, err := strconv.ParseFloat(fields[0], 64)
+		return name, labels, value, err == nil
+	}
+	fields := strings.Fields(rest)
+	if len(fields) != 2 || fields[0] == "" {
+		return "", nil, 0, false
+	}
+	value, err := strconv.ParseFloat(fields[1], 64)
+	return fields[0], labels, value, err == nil
 }
 
 // Down implements runtime.Adapter.
@@ -625,6 +675,7 @@ func (a *Adapter) Down(ctx context.Context, sessionID string) error {
 		_ = machine.process.Process.Kill()
 		_, _ = machine.process.Process.Wait()
 	}
+	_ = os.RemoveAll(machine.workdir)
 	a.mu.Lock()
 	delete(a.sessions, sessionID)
 	a.mu.Unlock()
@@ -655,7 +706,7 @@ func (a *Adapter) launch(ctx context.Context, machine *vm) error {
 	return fmt.Errorf("firecracker did not create API socket %s", machine.api.SocketPath)
 }
 
-func createOverlay(path string) error {
+func createOverlay(path, seedDir string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create overlay: %w", err)
@@ -668,7 +719,12 @@ func createOverlay(path string) error {
 	if _, err := exec.LookPath("mkfs.ext4"); err != nil {
 		return fmt.Errorf("%w: mkfs.ext4 is required to format the Firecracker overlay", runtime.ErrUnsupported)
 	}
-	cmd := exec.Command("mkfs.ext4", "-F", "-q", path)
+	args := []string{"-F", "-q"}
+	if seedDir != "" {
+		args = append(args, "-d", seedDir)
+	}
+	args = append(args, path)
+	cmd := exec.Command("mkfs.ext4", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("format overlay: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -707,10 +763,6 @@ func (a *Adapter) machine(sessionID string) (*vm, error) {
 		return nil, fmt.Errorf("%w: %s", runtime.ErrNotFound, sessionID)
 	}
 	return machine, nil
-}
-
-func (machine *vm) snapshotName() string {
-	return machine.id + ".snap"
 }
 
 // vsockGuestCID is the guest id the adapter addresses. Firecracker assigns

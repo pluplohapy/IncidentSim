@@ -40,6 +40,7 @@ const (
 	// inside the environment, and the journal is the audit trail of that.
 	EventExecRun    = "exec.run"
 	EventExecFailed = "exec.failed"
+	EventMetrics    = "metrics.sampled"
 
 	// Give-up marks that the participant asked for the answer. After a
 	// give-up the private view (root cause, reference, distractors) may be

@@ -48,6 +48,8 @@ type Postmortem struct {
 	VerifyCount int    `json:"verify_count"`
 	// AppliedFixes are the participant's changes, oldest first.
 	AppliedFixes []string `json:"applied_fixes"`
+	// WorkspaceDiffs are unified diffs captured at apply time.
+	WorkspaceDiffs []string `json:"workspace_diffs,omitempty"`
 
 	// PartialFix is set when the last verification passed correctness and
 	// failed quality: the system works and the cause survived.
@@ -116,6 +118,7 @@ func (o *Orchestrator) loadPostmortemFromJournal(sessionID string) (Postmortem, 
 	postmortem.FinishedAt = lastEventTime(journal.Events())
 	postmortem.Duration = humanDuration(postmortem.StartedAt, postmortem.FinishedAt)
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(journal.Events())
+	postmortem.WorkspaceDiffs = workspaceDiffs(journal.Events())
 	postmortem.applyStats(journal.Events())
 	return postmortem, nil
 }
@@ -137,6 +140,7 @@ func (o *Orchestrator) postmortemFrom(session *Session) (Postmortem, error) {
 		postmortem.AppliedFixes = append(postmortem.AppliedFixes, describePatch(patch))
 	}
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(events)
+	postmortem.WorkspaceDiffs = workspaceDiffs(events)
 	postmortem.applyStats(events)
 	return postmortem, nil
 }
@@ -222,6 +226,19 @@ func partialFixFrom(events []Event) (bool, string) {
 			"Quality gate при этом красный, поэтому замечание не декоративное."
 	}
 	return false, ""
+}
+
+func workspaceDiffs(events []Event) []string {
+	var out []string
+	for _, event := range events {
+		if event.Type != EventApplyStarted || event.Data == nil {
+			continue
+		}
+		if diff := stringOf(event.Data["diff"]); diff != "" {
+			out = append(out, diff)
+		}
+	}
+	return out
 }
 
 func stringOf(value any) string {
@@ -312,6 +329,17 @@ func (p Postmortem) Render() string {
 			b.WriteString(fmt.Sprintf("- %s\n", fix))
 		}
 		b.WriteString("\n")
+	}
+	if len(p.WorkspaceDiffs) > 0 {
+		b.WriteString("## Diff workspace\n\n")
+		for _, diff := range p.WorkspaceDiffs {
+			b.WriteString("```diff\n")
+			b.WriteString(diff)
+			if !strings.HasSuffix(diff, "\n") {
+				b.WriteByte('\n')
+			}
+			b.WriteString("```\n\n")
+		}
 	}
 
 	b.WriteString("## Корневая причина (эталон)\n\n")

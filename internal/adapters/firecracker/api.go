@@ -3,7 +3,7 @@
 //
 // It is the production engine: a task runs in its own microVM with KVM, its
 // rootfs is the Docker image of the workload service (a read-only layer plus a
-// writable overlay), and a reset is a snapshot restore instead of a cold boot.
+// writable overlay), and a reset reboots the microVM with a fresh overlay.
 package firecracker
 
 import (
@@ -23,7 +23,8 @@ import (
 // Firecracker listens on a unix socket per VM, so every call is a PUT to
 // 127.0.0.1 through a custom dialer. The API surface used here is exactly the
 // subset the simulator needs: boot source, machine config, drives, start,
-// snapshot create and resume.
+// snapshot create and load. The current adapter reset path deliberately uses a
+// cold reboot because a snapshot is tied to its original VM files.
 type API struct {
 	// SocketPath is the API socket of the VM.
 	SocketPath string
@@ -138,14 +139,14 @@ type InstanceAction struct {
 	ActionType string `json:"action_type"`
 }
 
-// SnapshotCreate is the POST /snapshot/create body.
+// SnapshotCreate is the PUT /snapshot/create body.
 type SnapshotCreate struct {
 	SnapshotPath string `json:"snapshot_path"`
 	MemFilePath  string `json:"mem_file_path"`
 	SnapshotType string `json:"snapshot_type"`
 }
 
-// SnapshotResume is the PATCH /snapshot/resume body.
+// SnapshotResume is the PUT /snapshot/load body.
 type SnapshotResume struct {
 	SnapshotPath   string `json:"snapshot_path"`
 	MemFilePath    string `json:"mem_file_path"`

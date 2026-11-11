@@ -6,9 +6,9 @@
 
 | Файл | Зачем |
 |------|-------|
-| [`firecracker.yml`](firecracker.yml) | главный playbook: установка, сеть, systemd, rootfs, baseline-снапшот |
+| [`firecracker.yml`](firecracker.yml) | главный playbook: установка, сеть, systemd и rootfs |
 | [`inventory.example.yml`](inventory.example.yml) | пример инвентаря bare-metal хоста |
-| `roles/firecracker/tasks/main.yml` | мост, tap-устройства, экспорт rootfs, baseline |
+| `roles/firecracker/tasks/main.yml` | мост, tap-устройства и экспорт rootfs |
 | `roles/firecracker/defaults/main.yml` | пути; они же, что в `incidentsim.yaml` |
 | `roles/firecracker/templates/` | скрипт сети и systemd-юниты |
 
@@ -28,7 +28,6 @@ firecracker:
   socket_dir: /var/lib/incidentsim/vms
   kernel_image: /var/lib/incidentsim/rootfs/vmlinux
   rootfs_image: /var/lib/incidentsim/rootfs/incidentsim_workload.squashfs
-  baseline_snapshot: /var/lib/incidentsim/snapshots/baseline.snap
   guest_agent_port: 51000
 ```
 
@@ -50,8 +49,8 @@ firecracker:
 достать интернет из тренажёра. Хост достаёт гостя через vsock-агент
 (`incidentsim-guest`), а не через сеть.
 
-## Снапшоты
+## Reset
 
-`incidentsim-baseline.service` один раз создаёт baseline-снапшот. Дальше
-`incidentsim reset` это restore: микро-VM поднимается за миллисекунды вместо
-холодной загрузки, и участник возвращается к началу инцидента.
+`incidentsim reset` пересоздаёт writable overlay и перезагружает microVM. Это
+MVP-путь без snapshot, потому что snapshot Firecracker связан с исходными
+дисками, tap и vsock-сокетами.

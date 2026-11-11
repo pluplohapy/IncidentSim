@@ -103,6 +103,10 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
+	now := r.Now
+	if now == nil {
+		now = time.Now
+	}
 	duration, err := time.ParseDuration(config.Duration)
 	if err != nil || duration <= 0 {
 		// A replay without a usable duration is a task bug, not a participant
@@ -118,7 +122,7 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 	ticker := time.NewTicker(pacingInterval(config.RPS))
 	defer ticker.Stop()
 
-	deadline := r.Now().Add(duration)
+	deadline := now().Add(duration)
 	var (
 		count       atomic.Int64
 		failures    atomic.Int64
@@ -134,7 +138,6 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 		concurrency = 4
 	}
 
-	now := r.Now
 	for now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -298,9 +301,13 @@ func (r *ReplayRunner) request(ctx context.Context, client *http.Client, endpoin
 		req.Body = io.NopCloser(strings.NewReader(request.Body))
 		req.ContentLength = int64(len(request.Body))
 	}
-	start := r.Now()
+	now := r.Now
+	if now == nil {
+		now = time.Now
+	}
+	start := now()
 	resp, err := client.Do(req)
-	latency := r.Now().Sub(start)
+	latency := now().Sub(start)
 	if err != nil {
 		return sample{latency: latency, err: err}
 	}

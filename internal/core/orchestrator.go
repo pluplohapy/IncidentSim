@@ -429,6 +429,9 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 			return fmt.Errorf("build workspace: %w", err)
 		}
 		if artifact == nil {
+			return fmt.Errorf("build workspace: builder returned no artifact")
+		}
+		if artifact == nil {
 			return fmt.Errorf("builder returned no artifact")
 		}
 		if artifact.Path != "" {
@@ -963,7 +966,20 @@ func (o *Orchestrator) Metrics(ctx context.Context, sessionID, service string) (
 	if err != nil {
 		return nil, err
 	}
-	return adapter.Metrics(ctx, session.ID, service)
+	samples, err := adapter.Metrics(ctx, session.ID, service)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(samples))
+	for _, sample := range samples {
+		names = append(names, sample.Name)
+	}
+	session.journal.Record(EventMetrics, fmt.Sprintf("metrics collected for %s (%d samples)", service, len(samples)), map[string]any{
+		"service": service,
+		"count":   len(samples),
+		"names":   names,
+	})
+	return samples, nil
 }
 
 // Hint hands out the next hint of a task and charges the session for it, so
