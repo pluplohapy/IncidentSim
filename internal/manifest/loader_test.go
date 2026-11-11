@@ -278,7 +278,7 @@ func TestValidateWithAssetsRejectsEscapingReplayPath(t *testing.T) {
 }
 
 func TestValidateWithAssetsChecksReplayProfile(t *testing.T) {
-	m, err := Load("../../testdata/manifests/valid/db-connection-leak.yaml")
+	m, err := Load("../../testdata/manifests/valid/fixture-code.yaml")
 	if err != nil {
 		t.Fatalf("load fixture: %v", err)
 	}

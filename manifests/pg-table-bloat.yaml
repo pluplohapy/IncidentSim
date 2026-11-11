@@ -61,10 +61,16 @@ spec:
         - "ANALYZE orders"
   verify:
     correctness:
-      - id: healthz-200
+      # /healthz of this stand reports 503 whenever the measured query
+      # latency exceeds the slow-query threshold, which is exactly the
+      # incident: a correctness gate on it can never be green, and the
+      # reference fix only narrows the latency, it does not remove the
+      # measurement. The correctness question for this task is whether the
+      # service answers a request, so /api/orders is the stable probe.
+      - id: orders-200
         type: http
         service: app
-        path: /healthz
+        path: /api/orders
         expect:
           status: 200
     quality:

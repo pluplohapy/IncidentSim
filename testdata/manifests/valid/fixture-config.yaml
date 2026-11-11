@@ -1,0 +1,71 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: fixture-config
+  title: "Фикстура: config-задача с политикой и логами"
+  level: config
+  estimated_minutes: 10
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        LOG_LEVEL: debug
+        LOG_FILE: /var/log/app/app.log
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+  editable: [config/app.conf]
+  symptoms:
+    - id: symptom
+      observation: "наблюдаемый симптом"
+  hints:
+    - level: 1
+      text: "подсказка 1"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: log-level-policy
+        type: policy
+        service: app
+        rule: config_flag_equals
+        file: /etc/app/app.conf
+        query: LOG_LEVEL
+        expect:
+          equals: info
+        reason: "политика уровня логов"
+      - id: no-secrets-in-logs
+        type: log
+        service: app
+        pattern: password
+        absent: true
+        reason: "секретов в логах быть не должно"
+    replay:
+      profile: workloads/fixture.yaml
+      duration: 20s
+      rps: 10
+  root_cause:
+    summary: "корневая причина инцидента в фикстуре"
+    layer: config
+  reference_solution:
+    summary: "эталонное решение фикстуры"
+  distractors:
+    - id: delete-log-file
+      title: "удалить файл лога"
+      symptom: symptom
+      masked_artifact: "история логов"
+      fails: log-level-policy
+      apply:
+        kind: files
+        service: app
+        from: config/app.conf
+        to: config/app.conf

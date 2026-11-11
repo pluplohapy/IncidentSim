@@ -1,0 +1,78 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: fixture-code
+  title: "Фикстура: code-задача с проверками и дистракторами"
+  level: code
+  estimated_minutes: 10
+spec:
+  runtime:
+    engine: compose
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+  editable: [app/handler.go]
+  symptoms:
+    - id: symptom
+      observation: "наблюдаемый симптом"
+  hints:
+    - level: 1
+      text: "подсказка 1"
+    - level: 2
+      text: "подсказка 2"
+    - level: 3
+      text: "подсказка 3"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: artifact-check
+        type: sql
+        service: db
+        sql: "SELECT 1"
+        expect:
+          min: 1
+        reason: "артефактная проверка"
+      - id: behavior-check
+        type: replay
+        field: error_rate
+        expect:
+          max: 0.005
+        reason: "поведение под нагрузкой"
+    replay:
+      profile: workloads/fixture.yaml
+      duration: 20s
+      rps: 10
+  root_cause:
+    summary: "корневая причина инцидента в фикстуре"
+    layer: code
+  reference_solution:
+    summary: "эталонное решение фикстуры"
+  distractors:
+    - id: bigger-pool
+      title: "увеличить лимит"
+      symptom: symptom
+      masked_artifact: "лимит пула"
+      fails: artifact-check
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
