@@ -100,9 +100,10 @@ func contract(ctx context.Context, api *cli.Client, taskID, engine string) (*Res
 	start = time.Now()
 	report, err := verifyOnce(ctx, api, sessionID)
 	res.BreakTime = time.Since(start)
-	res.BreakOK = err == nil && (report.Verdict == verifier.VerdictFail || report.Verdict == verifier.VerdictPartial)
+	res.BreakOK = err == nil && report != nil &&
+		(report.Verdict == verifier.VerdictFail || report.Verdict == verifier.VerdictPartial)
 	if !res.BreakOK {
-		res.Err = fmt.Errorf("baseline verify: verdict=%s, want fail|partial", report.Verdict)
+		res.Err = fmt.Errorf("baseline verify: %s, want fail|partial", verdictOrError(report, err))
 		return res, res.Err
 	}
 
@@ -119,9 +120,11 @@ func contract(ctx context.Context, api *cli.Client, taskID, engine string) (*Res
 	start = time.Now()
 	report, err = verifyOnce(ctx, api, sessionID)
 	res.PassTime = time.Since(start)
-	res.PassOK = err == nil && report.Verdict == verifier.VerdictPass
+	// verifyOnce returns a nil report together with an error, so the nil
+	// check is what keeps a transport failure from crashing the selfcheck.
+	res.PassOK = err == nil && report != nil && report.Verdict == verifier.VerdictPass
 	if !res.PassOK {
-		res.Err = fmt.Errorf("reference verify: verdict=%s, want pass", report.Verdict)
+		res.Err = fmt.Errorf("reference verify: %s, want pass", verdictOrError(report, err))
 		return res, res.Err
 	}
 
@@ -239,6 +242,19 @@ func boolWord(ok bool) string {
 		return "PASS"
 	}
 	return "FAIL"
+}
+
+// verdictOrError renders a verification step for a failure message. A failed
+// request leaves the report nil, and formatting the error instead of the
+// verdict is the difference between a reported failure and a panic.
+func verdictOrError(report *verifier.Report, err error) string {
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	if report == nil {
+		return "no report"
+	}
+	return "verdict=" + report.Verdict
 }
 
 // ensureTask checks that the task exists in the catalog.
