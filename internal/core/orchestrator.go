@@ -571,6 +571,11 @@ func (o *Orchestrator) applyFromWorkspace(ctx context.Context, session *Session,
 			session.journal.Record(EventBuildFailed, "build failed", map[string]any{"error": err.Error()})
 			return fmt.Errorf("build workspace: %w", err)
 		}
+		// GoBuilder owns a short-lived host artifact. Deploy consumes it
+		// synchronously, so clean it up only after the adapter has read it.
+		if artifact.Path != "" {
+			defer os.RemoveAll(filepath.Dir(artifact.Path))
+		}
 		session.journal.Record(EventBuildOK, "build ok", map[string]any{
 			"service": artifact.Service,
 			"digest":  artifact.Digest,

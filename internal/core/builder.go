@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	stdRuntime "runtime"
 	"strings"
 	"time"
 
@@ -52,6 +53,9 @@ func (b *GoBuilder) Build(ctx context.Context, workspaceDir string) (*runtime.Ar
 	if b.Timeout <= 0 {
 		b.Timeout = DefaultBuildTimeout
 	}
+	if b.BuildCache == "" {
+		b.BuildCache = "incidentsim-go-build-cache"
+	}
 
 	digest, err := hashDirectory(workspaceDir)
 	if err != nil {
@@ -64,24 +68,25 @@ func (b *GoBuilder) Build(ctx context.Context, workspaceDir string) (*runtime.Ar
 	if err != nil {
 		return nil, fmt.Errorf("create build output dir: %w", err)
 	}
-	defer os.RemoveAll(outDir)
-
+	completed := false
+	defer func() {
+		if !completed {
+			_ = os.RemoveAll(outDir)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
 	defer cancel()
 
 	// Warm the module cache first with network, then rebuild with the network
 	// closed. A cold cache needs to download modules; a warm one must not
 	// reach the network.
+	baseArgs := b.containerArgs()
 	steps := [][]string{
-		{"run", "--rm", "-v", b.BuildCache + ":/go/pkg/mod", "-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "mod", "download"},
-		{"run", "--rm", "--network", "none", "-v", b.BuildCache + ":/go/pkg/mod", "-v", outDir + ":/out", "-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "build", "-trimpath", "-o", "/out/app", "."},
+		append(append([]string{"run", "--rm"}, baseArgs...), []string{"-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "mod", "download"}...),
+		append(append([]string{"run", "--rm", "--network", "none"}, baseArgs...), []string{"-v", outDir + ":/out", "-w", "/src", "-v", workspaceDir + ":/src:ro", b.Image, "go", "build", "-trimpath", "-o", "/out/app", "."}...),
 	}
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, "docker", step...)
-		cmd.Env = append(cmd.Env, "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-		if b.Memory != "" {
-			cmd.Env = append(cmd.Env, "MEMORY="+b.Memory)
-		}
 		var out, stderr bytes.Buffer
 		cmd.Stdout = &out
 		cmd.Stderr = &stderr
@@ -92,12 +97,35 @@ func (b *GoBuilder) Build(ctx context.Context, workspaceDir string) (*runtime.Ar
 	}
 
 	binaryPath := filepath.Join(outDir, "app")
+	completed = true
 	return &runtime.Artifact{
 		Service: "app",
 		Kind:    "binary",
 		Path:    binaryPath,
 		Digest:  digest,
 	}, nil
+}
+
+// containerArgs returns the common constraints for one-shot build containers.
+// The Go variables are docker -e settings because environment variables of the
+// docker client do not configure the process in the container.
+func (b *GoBuilder) containerArgs() []string {
+	return []string{
+		"--memory", valueOrDefault(b.Memory, "512m"),
+		"--cpus", valueOrDefault(b.CPUs, "1"),
+		"--pids-limit", valueOrDefault(b.Pids, "128"),
+		"-e", "GOOS=linux",
+		"-e", "GOARCH=" + stdRuntime.GOARCH,
+		"-e", "CGO_ENABLED=0",
+		"-v", b.BuildCache + ":/go/pkg/mod",
+	}
+}
+
+func valueOrDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func hashDirectory(dir string) (string, error) {
