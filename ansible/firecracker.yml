@@ -96,7 +96,7 @@
     - name: Download the guest kernel
       ansible.builtin.get_url:
         url: "{{ incidentsim_kernel_url }}"
-        dest: "{{ incidentsim_rootfs_dir }}/vmlinux"
+        dest: "/var/lib/incidentsim/vmlinux"
         mode: "0644"
       tags: [firecracker]
 
