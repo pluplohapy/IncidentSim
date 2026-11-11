@@ -38,11 +38,10 @@ for task in "${TASKS[@]}"; do
     # Copy the shared stand into app/ as package main.
     for f in "$STAND_DIR"/*.go; do
         base="$(basename "$f")"
-        if [ ! -f "$app/$base" ]; then
-            # Rewrite package stand -> package main so the file compiles
-            # inside the app package.
-            sed 's/^package stand$/package main/' "$f" > "$app/$base"
-        fi
+        # Rewrite package stand -> package main so the file compiles inside the
+        # app package. These files are generated and must be refreshed on every
+        # run; only handler.go and migrations are participant-owned.
+        sed 's/^package stand$/package main/' "$f" > "$app/$base"
     done
 
     # Keep existing handler.go if present; otherwise write a minimal stub
