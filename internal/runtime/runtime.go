@@ -1,5 +1,4 @@
-// Package runtime defines the contract between the core and an isolation
-// engine: Firecracker in production, Docker Compose for development.
+// Package runtime defines the contract between the core and Docker Compose.
 //
 // The interface is deliberately small and synchronous. Everything the core
 // needs from an environment is expressed as a method here, so a new engine is
@@ -34,8 +33,7 @@ type Instance struct {
 	Engine string
 	// Services are the task services, in manifest order.
 	Services []Service
-	// Workdir is where the adapter keeps its state (compose project dir,
-	// firecracker socket dir). It is the only place the adapter writes.
+	// Workdir is where the Compose adapter keeps its state.
 	Workdir string
 	// StartedAt is the moment Up returned successfully.
 	StartedAt time.Time
@@ -97,8 +95,7 @@ type Artifact struct {
 }
 
 // Builder builds a task workspace into a deployable artifact. It is engine
-// agnostic: the same GoBuilder works for compose and Firecracker because the
-// produced binary targets Linux.
+// agnostic: a builder produces a deployable artifact from the workspace.
 type Builder interface {
 	// Build compiles the workspace at workspaceDir into an Artifact. On
 	// failure it returns the compiler output so the participant can see it,
@@ -165,12 +162,12 @@ type MetricSample struct {
 }
 
 // Adapter is the runtime contract. Implementations live in
-// internal/adapters/compose and internal/adapters/firecracker.
+// internal/adapters/compose.
 //
 // Every method takes a session id: the core owns the lifecycle and never
 // reuses an id, so an adapter can treat the id as a primary key.
 type Adapter interface {
-	// Name returns the engine identifier, e.g. "compose" or "firecracker".
+	// Name returns the engine identifier ("compose").
 	Name() string
 
 	// Up provisions the environment and starts every service of the task.
@@ -191,10 +188,9 @@ type Adapter interface {
 	// Metrics returns the latest metrics of a service.
 	Metrics(ctx context.Context, sessionID string, service string) ([]MetricSample, error)
 
-	// Reset restores the baseline state of the environment. Firecracker
-	// restores the baseline snapshot; compose does a down/up. The session id
-	// stays valid after a reset. It returns the refreshed instance because a
-	// reset can move published ports.
+	// Reset restores the baseline state of the environment with a Compose
+	// down/up. The session id stays valid after a reset. It returns the
+	// refreshed instance because a reset can move published ports.
 	Reset(ctx context.Context, sessionID string) (*Instance, error)
 
 	// Apply pushes a configuration change into a running environment. It

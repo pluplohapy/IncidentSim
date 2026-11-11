@@ -163,9 +163,9 @@ func (m *Manifest) validateStructure() []Issue {
 		issues = append(issues, Issue{Field: "metadata.level", Message: fmt.Sprintf("must be one of config, code, db, composite")})
 	}
 	switch m.Spec.Runtime.Engine {
-	case "compose", "firecracker", "":
+	case "compose", "":
 	default:
-		issues = append(issues, Issue{Field: "spec.runtime.engine", Message: "must be compose or firecracker"})
+		issues = append(issues, Issue{Field: "spec.runtime.engine", Message: "must be compose"})
 	}
 	return issues
 }

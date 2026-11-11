@@ -13,11 +13,10 @@ description: Как писать README, Mermaid-диаграммы и прим�
 | Документ | Что в нём | Чего в нём нет |
 |----------|-----------|----------------|
 | [`README.md`](../README.md) | спецификация: архитектура, этапы, критерии MVP | команд, которые нужно угадывать |
-| [`docs/local-macos.md`](../docs/local-macos.md) | локальный путь на Apple Silicon | путей Firecracker |
-| [`docs/runbook.md`](../docs/runbook.md) | bare-metal с KVM | локальных обходных путей |
+| [`docs/local-macos.md`](../docs/local-macos.md) | локальный путь с Docker Compose | неподдерживаемых движков |
+| [`docs/runbook.md`](../docs/runbook.md) | запуск Docker Compose | локальных обходных путей |
 | [`docs/architecture.md`](../docs/architecture.md) | Mermaid-диаграммы | кода |
 | [`docs/adding-a-task.md`](../docs/adding-a-task.md) | как добавить манифест | теории из манифестов |
-| [`docs/teleport-audit.md`](../docs/teleport-audit.md) | опциональный аудит | обещаний записи потока |
 
 Правило: **один факт — в одном документе.** Остальные ссылаются.
 
@@ -53,7 +52,7 @@ README — источник правды для внешнего взгляда.
 - [ ] каждый путь из README существует в файловой системе;
 - [ ] диаграммы объясняют то, что текст объясняет хуже;
 - [ ] пример манифеста проходит `./bin/incidentsim validate`;
-- [ ] ограничения named (нет KVM, нет nested virt), а не «может не работать».
+- [ ] ограничения Compose названы явно, а не скрыты за «может не работать».
 
 ## Как проверить скилл
 
@@ -62,5 +61,4 @@ $ ./bin/incidentsim validate          # все примеры каталога �
 $ ./scripts/demo.sh                   # команды из README действительно работают
 ```
 
-Связанные: [spec-first](spec-first/SKILL.md), [firecracker-ansible](firecracker-ansible/SKILL.md),
-[manifest-authoring](manifest-authoring/SKILL.md).
+Связанные: [spec-first](spec-first/SKILL.md), [manifest-authoring](manifest-authoring/SKILL.md).

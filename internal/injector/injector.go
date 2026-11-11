@@ -1,8 +1,7 @@
 // Package injector activates faults declared by a manifest.
 //
 // A manifest declares what is broken; an injector knows how to break it in a
-// concrete environment. The split keeps the catalog free of engine details:
-// feature_flag works the same way on compose and on a Firecracker microVM.
+// concrete environment. The split keeps the catalog free of Compose details.
 package injector
 
 import (

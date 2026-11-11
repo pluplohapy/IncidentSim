@@ -147,8 +147,8 @@ var PolicyRules = map[string]func(ctx context.Context, env Environment, check Ch
 		})
 		if err != nil {
 			if errors.Is(err, runtime.ErrUnsupported) {
-				// Fall back to host stat for engines that cannot exec inside
-				// the container (e.g. firecracker without a guest agent).
+				// Fall back to host stat for a runtime that cannot exec inside
+				// the container.
 				info, statErr := os.Stat(path)
 				if statErr != nil {
 					return fmt.Errorf("log file %s is gone: %v", path, statErr)

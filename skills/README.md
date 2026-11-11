@@ -9,7 +9,6 @@
 | [spec-first](spec-first/SKILL.md) | читать спецификацию, задавать вопросы и планировать ветку до кода | начало любой ветки с новым контрактом |
 | [manifest-authoring](manifest-authoring/SKILL.md) | правила YAML-манифеста задачи | новая задача в `manifests/` |
 | [verifier-design](verifier-design/SKILL.md) | двухуровневые проверки, replay, policy-проверки | проектирование `verify` и дистракторов |
-| [firecracker-ansible](firecracker-ansible/SKILL.md) | microVM, tap-сеть, снапшоты, systemd-юниты | изменения в `ansible/` и адаптере Firecracker |
 | [git-workflow](git-workflow/SKILL.md) | ветки, атомарные коммиты, stacked branches, лимит 500 строк | любой коммит |
 | [code-review](code-review/SKILL.md) | пятиосевая проверка перед коммитом | ревью своей же ветки |
 | [testing](testing/SKILL.md) | unit ядра, интеграционные на compose, тест на дистрактор | новые пакеты и проверки |

@@ -94,9 +94,9 @@ type Spec struct {
 	Reference         string            `yaml:"reference,omitempty" json:"reference,omitempty"`
 }
 
-// RuntimeSpec selects the isolation engine and the baseline artefact.
+// RuntimeSpec selects the Docker Compose runtime and resource limits.
 type RuntimeSpec struct {
-	Engine    string `yaml:"engine" json:"engine"` // compose | firecracker
+	Engine    string `yaml:"engine" json:"engine"` // compose
 	Snapshot  string `yaml:"snapshot,omitempty" json:"snapshot,omitempty"`
 	CPUCount  int    `yaml:"cpu_count,omitempty" json:"cpu_count,omitempty"`
 	MemoryMiB int    `yaml:"memory_mib,omitempty" json:"memory_mib,omitempty"`

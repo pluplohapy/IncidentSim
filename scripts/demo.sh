@@ -36,8 +36,7 @@ echo "docker готов: $(docker info --format '{{.OperatingSystem}} {{.Archite
 # --- 2. сборка --------------------------------------------------------------
 say "сборка ядра, CLI и образа задачи"
 make build >/dev/null
-docker build -q -t incidentsim/workload:dev -f build/workload.Dockerfile . >/dev/null
-echo "образ incidentsim/workload:dev собран"
+echo "CLI incidentsim собран"
 
 # --- 3. ядро ----------------------------------------------------------------
 say "запуск ядра"

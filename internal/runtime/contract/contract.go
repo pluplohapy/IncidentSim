@@ -1,5 +1,5 @@
 // Package contract contains the runtime.Adapter contract suite. Run it against
-// any runtime.Adapter implementation (fake, compose, firecracker) to prove it
+// the Compose runtime adapter (or a fake) to prove it
 // honors the runtime contract:
 //
 //   - Up is idempotent per session id

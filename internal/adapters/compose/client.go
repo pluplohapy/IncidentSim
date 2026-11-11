@@ -1,10 +1,7 @@
 // Package compose implements the runtime adapter on top of Docker Compose.
 //
-// It is the development fallback: it needs no KVM, no Firecracker and no
-// Ansible, so the core, the injectors and the verifier can be developed and
-// tested on a laptop. The manifest services become compose services, and the
-// Docker images become the read-only rootfs layers of the microVM later, so a
-// task written for compose runs on Firecracker unchanged.
+// It is the supported runtime and needs only a local Docker daemon with the
+// Compose plugin, so it can be developed and tested on a laptop.
 package compose
 
 import (

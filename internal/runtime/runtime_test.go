@@ -88,7 +88,7 @@ func TestFakeAdapterTracksAppliedEnvironment(t *testing.T) {
 }
 
 func TestFakeAdapterPropagatesFailures(t *testing.T) {
-	adapter := NewFake("firecracker")
+	adapter := NewFake("compose-test")
 	adapter.FailWith = ErrTimeout
 	ctx := context.Background()
 

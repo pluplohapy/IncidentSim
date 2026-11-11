@@ -12,7 +12,7 @@
 //	   named in the distractor's fails field
 //	(e) stop
 //
-// --engine selects compose|firecracker. Each step's duration is printed.
+// Each step's duration is printed.
 package selfcheck
 
 import (
@@ -25,14 +25,6 @@ import (
 
 	"incidentsim/internal/cli"
 	"incidentsim/internal/verifier"
-)
-
-// Engine selects the runtime engine.
-type Engine string
-
-const (
-	EngineCompose   Engine = "compose"
-	EngineFirecrack Engine = "firecracker"
 )
 
 // Result is the outcome of one selfcheck run.
@@ -69,8 +61,8 @@ type DistractorResult struct {
 }
 
 // Contract runs the full selfcheck contract for one task.
-func Contract(ctx context.Context, api *cli.Client, engine Engine, taskID string) (*Result, error) {
-	res := &Result{TaskID: taskID, Engine: string(engine)}
+func Contract(ctx context.Context, api *cli.Client, taskID string) (*Result, error) {
+	res := &Result{TaskID: taskID, Engine: "compose"}
 
 	// Ensure the task exists.
 	if err := ensureTask(ctx, api, taskID); err != nil {

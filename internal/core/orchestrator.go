@@ -38,11 +38,6 @@ type Orchestrator struct {
 	Adapters  map[string]runtime.Adapter
 	Injectors *injector.Registry
 	Verifier  verifier.Verifier
-	// Audit records what happened in a session for an external system. It is
-	// optional and off the main path: a missing or broken audit backend is a
-	// warning, never a failed session.
-	Audit AuditRecorder
-
 	// Builder compiles a code-level workspace into a deployable artifact. It
 	// is set by the deployment (cmd/incidentsim serve) and is required for
 	// code-level tasks.
@@ -151,7 +146,7 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 	journal.Record(EventSessionStarted, "session started", map[string]any{"task": taskID, "engine": engine})
 
 	// Any failure after the session is registered must clean up: the workspace,
-	// the environment (compose project / Firecracker VM), the session image and
+	// the environment (Compose project), the session image and
 	// the session entry itself, so a failed Start leaves nothing behind.
 	cleanup := func() {
 		_ = adapter.Down(ctx, sessionID)
@@ -1036,7 +1031,6 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 	}
 	session.journal.Record(EventTeardown, "environment torn down", nil)
 	session.SetState(StateTornDown)
-	o.audit(session, EventSessionFinished)
 	session.journal.Close()
 	o.Sessions.Remove(session.ID)
 	return downErr
@@ -1086,25 +1080,6 @@ func (o *Orchestrator) removeSessionImage(ctx context.Context, sessionID string)
 		return fmt.Errorf("docker rmi %s: %w: %s", tag, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
-}
-
-// audit records a session event for the configured backend. It never fails the
-// operation it is called from, because audit is an obligation and not a gate.
-func (o *Orchestrator) audit(session *Session, eventType string) {
-	if o.Audit == nil {
-		return
-	}
-	record := SessionRecord{
-		SessionID: session.ID,
-		TaskID:    session.TaskID,
-		StartedAt: session.StartedAt,
-		EndedAt:   time.Now().UTC(),
-	}
-	if err := o.Audit.Record(context.Background(), record); err != nil {
-		session.journal.Record(eventType, "audit could not record the session", map[string]any{"error": err.Error()})
-		return
-	}
-	session.journal.Record(eventType, "session recorded for audit", map[string]any{"backend": o.Audit.Name()})
 }
 
 // waitForDatabase polls a trivial statement until the database answers.

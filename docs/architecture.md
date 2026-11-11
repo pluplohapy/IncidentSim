@@ -20,13 +20,10 @@ flowchart TB
         CORE --> JRN["journal<br/>.incidentsim/journal/*.jsonl"]
         CORE --> PM["postmortem<br/>из journal"]
     end
-    subgraph engines["Движки изоляции"]
-        RT --> COMPOSE["compose adapter<br/>docker compose (fallback, macOS)"]
-        RT --> FC["firecracker adapter<br/>microVM + KVM (bare-metal)"]
+    subgraph engines["Движок изоляции"]
+        RT --> COMPOSE["compose adapter<br/>docker compose"]
     end
     COMPOSE --> DOCKER["Docker daemon"]
-    FC --> KVM["/dev/kvm"]
-    FC --> VSOCK["vsock-агент в guest"]
     VER --> LOAD["replay runner<br/>нагрузка в окне наблюдения"]
 ```
 
@@ -49,7 +46,7 @@ sequenceDiagram
     I->>R: Apply(env / exec)
     O-->>U: сессия running
 
-    U->>A: apply --set KEY=VALUE
+    U->>A: apply из workspace
     A->>O: Apply
     O->>R: Apply(patch)
     O-->>U: применено
@@ -62,7 +59,7 @@ sequenceDiagram
 
     U->>A: reset
     A->>O: Reset
-    O->>R: Reset (snapshot restore / down-up)
+    O->>R: Reset (down/up)
     O->>I: Activate(fault...) снова
     O-->>U: baseline восстановлен
 ```

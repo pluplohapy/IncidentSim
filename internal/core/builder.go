@@ -1,6 +1,5 @@
 // Package core provides the Builder that turns a participant workspace into a
-// deployable artifact. It is engine agnostic: the same builder works for
-// compose and Firecracker because the produced binary targets Linux.
+// deployable artifact for Docker Compose.
 //
 // Building happens in a throw-away container (no docker.sock on the host is
 // needed beyond the docker CLI the compose engine already requires), with the

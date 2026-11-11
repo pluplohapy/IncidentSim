@@ -5,7 +5,7 @@
 // The stand provides /healthz, /metrics, /debug/reset, honest Prometheus
 // counters, a background worker queue with a persistent jobs table, and
 // /debug/invariant/<name>. It is compiled into the service binary by the
-// Builder and deployed by the engine (compose or Firecracker).
+// Builder and deployed by Docker Compose.
 //
 // A task scenario syncs this package via scripts/sync-stand.sh: it copies
 // internal/stand/*.go into app/ and leaves exactly one editable file

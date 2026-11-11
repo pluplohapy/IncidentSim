@@ -14,10 +14,8 @@ import (
 
 // scrapeMetrics reads a Prometheus text exposition from a service endpoint.
 //
-// Prometheus is the metrics format of the whole system: the workload service
-// exposes it directly and the Firecracker guest agent forwards it, so the core
-// parses metrics in exactly one place per engine instead of duplicating a
-// query language.
+// Prometheus is the metrics format of the whole system. The service exposes it
+// directly, so the core parses metrics in one place.
 func scrapeMetrics(ctx context.Context, url, service string) ([]runtime.MetricSample, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

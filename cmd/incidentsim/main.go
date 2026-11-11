@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"incidentsim/internal/adapters/compose"
-	"incidentsim/internal/adapters/firecracker"
-	"incidentsim/internal/adapters/teleport"
 	"incidentsim/internal/cli"
 	"incidentsim/internal/core"
 	"incidentsim/internal/injector"
@@ -170,21 +168,10 @@ func serve(args []string) error {
 		return err
 	}
 
-	adapters := map[string]runtime.Adapter{}
-	if config.Engine == "compose" || config.Engine == "" {
-		adapters["compose"] = compose.New(config.StateDir())
+	if config.Engine != "compose" {
+		return fmt.Errorf("unsupported engine %q: only docker compose is supported", config.Engine)
 	}
-	if config.Engine == "firecracker" {
-		adapters["firecracker"] = firecracker.New(firecracker.Config{
-			FirecrackerBin: config.Firecracker.FirecrackerBin,
-			SocketDir:      config.Firecracker.SocketDir,
-			KernelImage:    config.Firecracker.KernelImage,
-			RootfsDir:      filepath.Dir(config.Firecracker.RootfsImage),
-			BaselineDir:    filepath.Dir(config.Firecracker.BaselineSnapshot),
-			GuestAgentPort: config.Firecracker.GuestAgentPort,
-		})
-		adapters["compose"] = compose.New(config.StateDir())
-	}
+	adapters := map[string]runtime.Adapter{"compose": compose.New(config.StateDir())}
 
 	grader := verifier.NewManifestVerifier()
 	grader.ProjectDir = config.ProjectDir()
@@ -196,12 +183,6 @@ func serve(args []string) error {
 		Image:      "golang:1.24-alpine",
 		BuildCache: "incidentsim-go-build-cache",
 	}
-	orchestrator.Audit = teleport.FromConfig(teleport.Config{
-		Enabled:  config.Teleport.Enabled,
-		Endpoint: config.Teleport.Endpoint,
-		Timeout:  30 * time.Second,
-	})
-
 	server := &http.Server{
 		Addr:              config.Listen,
 		Handler:           core.NewServer(orchestrator).Handler(),
@@ -642,7 +623,6 @@ func validateCmd(args []string) error {
 
 func selfcheckCmd(args []string) error {
 	fs := flag.NewFlagSet("selfcheck", flag.ExitOnError)
-	engine := fs.String("engine", "compose", "движок: compose|firecracker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -650,7 +630,7 @@ func selfcheckCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := selfcheckpkg.Contract(context.Background(), client(nil), selfcheckpkg.Engine(*engine), task)
+	res, err := selfcheckpkg.Contract(context.Background(), client(nil), task)
 	if err != nil {
 		return err
 	}

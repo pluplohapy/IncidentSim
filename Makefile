@@ -5,7 +5,6 @@
 
 TASK        ?= db-connection-leak
 BINARY      := incidentsim
-WORKLOAD    := incidentsim-workload
 GO          := go
 GOFLAGS     ?=
 # VERSION and COMMIT are resolved *before* LDFLAGS uses them: LDFLAGS is
@@ -25,9 +24,8 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build the CLI and the simulated workload service
+build: ## Build the CLI
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/$(BINARY)
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(WORKLOAD) ./cmd/$(WORKLOAD)
 
 .PHONY: test
 test: ## Run unit tests
@@ -61,21 +59,9 @@ check: fmt vet test ## Everything CI runs on every push
 tools: ## Install the linter
 	$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
-.PHONY: workload-image
-workload-image: ## Build the simulated service image used by compose tasks
-	docker build -q -t incidentsim/workload:dev -f build/workload.Dockerfile .
-
 .PHONY: colima
 colima: ## Start the local Linux VM on macOS (Colima + Docker)
 	colima start --cpu 4 --memory 8 --disk 60 --vm-type vz
-
-.PHONY: demo
-demo: build ## Run one task end to end: broken, masked, fixed, postmortem
-	./scripts/demo.sh $(TASK)
-
-.PHONY: ansible-check
-ansible-check: ## Validate the Firecracker playbook without running it
-	ansible-playbook --syntax-check -i ansible/inventory.example.yml ansible/firecracker.yml
 
 .PHONY: run-dev
 run-dev: build ## Run the core API against the compose catalog

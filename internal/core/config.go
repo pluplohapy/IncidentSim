@@ -21,39 +21,12 @@ type Config struct {
 	Catalog string `yaml:"catalog"`
 	// State is the directory holding journals and scratch compose projects.
 	State string `yaml:"state"`
-	// Engine selects the runtime adapter: compose or firecracker.
+	// Engine selects the runtime adapter. Docker Compose is the only supported
+	// engine.
 	Engine string `yaml:"engine"`
-	// Firecracker holds the paths the Firecracker adapter needs. It is empty
-	// when the compose engine is used.
-	Firecracker FirecrackerConfig `yaml:"firecracker"`
-	// Teleport holds the optional session-audit integration.
-	Teleport TeleportConfig `yaml:"teleport"`
 
 	// path is the file the config was loaded from, for error messages.
 	path string
-}
-
-// FirecrackerConfig points at the artefacts provisioned by Ansible.
-type FirecrackerConfig struct {
-	// FirecrackerBin is the firecracker binary path.
-	FirecrackerBin string `yaml:"firecracker_bin"`
-	// SocketDir holds the API sockets of running microVMs.
-	SocketDir string `yaml:"socket_dir"`
-	// KernelImage and RootfsImage are the guest artefacts.
-	KernelImage string `yaml:"kernel_image"`
-	RootfsImage string `yaml:"rootfs_image"`
-	// BaselineSnapshot is the snapshot Reset restores.
-	BaselineSnapshot string `yaml:"baseline_snapshot"`
-	// GuestAgentPort is the vsock port the in-guest agent listens on.
-	GuestAgentPort uint32 `yaml:"guest_agent_port"`
-}
-
-// TeleportConfig is the optional audit integration.
-type TeleportConfig struct {
-	// Endpoint is the Teleport auth server address.
-	Endpoint string `yaml:"endpoint"`
-	// Enabled turns the audit adapter on.
-	Enabled bool `yaml:"enabled"`
 }
 
 // DefaultConfig returns the configuration of a development machine: compose

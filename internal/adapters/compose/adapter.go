@@ -21,9 +21,7 @@ import (
 	"incidentsim/internal/runtime"
 )
 
-// Adapter implements runtime.Adapter with Docker Compose. It is the fallback
-// engine used whenever KVM or Firecracker is unavailable, and the engine the
-// test-suite runs against.
+// Adapter implements runtime.Adapter with Docker Compose.
 type Adapter struct {
 	// BaseDir is where per-session compose projects are written, e.g.
 	// ".incidentsim/compose".

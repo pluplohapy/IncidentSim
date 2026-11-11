@@ -8,8 +8,7 @@ import (
 )
 
 // waitEndpoint polls one healthcheck endpoint until the service answers or the
-// poll budget is exhausted. Both engines share it so that "Up returned" means
-// the same thing for compose and for Firecracker.
+// poll budget is exhausted, so that "Up returned" has one precise meaning.
 //
 // Any HTTP response counts, including a 5xx: an incident environment is meant
 // to come up degraded, and "the process answers" is what makes it usable for a
