@@ -10,7 +10,7 @@
 | [`inventory.example.yml`](inventory.example.yml) | пример инвентаря bare-metal хоста |
 | `roles/firecracker/tasks/main.yml` | мост, tap-устройства и экспорт rootfs |
 | `roles/firecracker/defaults/main.yml` | пути; они же, что в `incidentsim.yaml` |
-| `roles/firecracker/templates/` | скрипт сети и systemd-юниты |
+| `roles/firecracker/templates/` | сеть, core и per-VM systemd-юниты |
 
 ## Запуск
 
@@ -54,3 +54,7 @@ firecracker:
 `incidentsim reset` пересоздаёт writable overlay и перезагружает microVM. Это
 MVP-путь без snapshot, потому что snapshot Firecracker связан с исходными
 дисками, tap и vsock-сокетами.
+
+Роль также ставит `incidentsim-core.service`. Перед включением юнита положите
+собранный `incidentsim` в путь `incidentsim_core_bin` и конфигурацию в
+`incidentsim_core_config`.

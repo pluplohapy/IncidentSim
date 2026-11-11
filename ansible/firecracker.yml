@@ -25,6 +25,7 @@
           - kvm
           - qemu-utils
           - squashfs-tools
+          - nftables
           - socat
           - python3
         state: present
@@ -96,6 +97,7 @@
         url: "{{ incidentsim_kernel_url }}"
         dest: "/var/lib/incidentsim/vmlinux"
         mode: "0644"
+        checksum: "{{ incidentsim_kernel_checksum }}"
       tags: [firecracker]
 
     - name: Authorise the simulator user to run firecracker
@@ -109,6 +111,14 @@
       ansible.builtin.template:
         src: templates/incidentsim-vm@.service.j2
         dest: /etc/systemd/system/incidentsim-vm@.service
+        mode: "0644"
+      notify: Reload systemd
+      tags: [systemd]
+
+    - name: Install the IncidentSim core unit
+      ansible.builtin.template:
+        src: templates/incidentsim-core.service.j2
+        dest: /etc/systemd/system/incidentsim-core.service
         mode: "0644"
       notify: Reload systemd
       tags: [systemd]

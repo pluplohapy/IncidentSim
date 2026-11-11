@@ -25,8 +25,20 @@ for index in $(seq 0 $((TAPS - 1))); do
     ip link set "$tap" up
 done
 
-# Only the microVM subnet is forwarded; the guest has no default route.
-iptables -t nat -C POSTROUTING -s 172.30.0.0/24 ! -o "$BRIDGE" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -s 172.30.0.0/24 ! -o "$BRIDGE" -j MASQUERADE
+# Keep the microVM network isolated: no NAT/default route to the outside world.
+# The bridge is allowed to forward only within itself, which is enough for
+# host-to-guest diagnostics and prevents a task from becoming a network proxy.
+if ! nft list table inet incidentsim >/dev/null 2>&1; then
+    nft -f - <<'EOF'
+table inet incidentsim {
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+}
+EOF
+fi
+if ! nft list chain inet incidentsim forward | grep -Fq "iifname \"$BRIDGE\""; then
+    nft add rule inet incidentsim forward iifname "$BRIDGE" oifname "$BRIDGE" accept
+fi
 
 echo "incidentsim network ready: bridge $BRIDGE, $TAPS tap devices"

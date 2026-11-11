@@ -1,0 +1,20 @@
+[Unit]
+Description=IncidentSim core API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ incidentsim_user }}
+Group={{ incidentsim_user }}
+ExecStart={{ incidentsim_core_bin }} serve --config {{ incidentsim_core_config }} --addr {{ incidentsim_core_addr }}
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths={{ incidentsim_state_dir }}
+
+[Install]
+WantedBy=multi-user.target
