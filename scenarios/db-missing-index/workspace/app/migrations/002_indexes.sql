@@ -1,0 +1,5 @@
+-- Supporting indexes of the order list.
+--
+-- The stand applies every statement of this file at boot, so an index the
+-- query plan needs belongs here. Statements stay idempotent: the service is
+-- restarted on every apply and the file is applied again each time.

@@ -1,0 +1,16 @@
+profile: db-tx-no-rollback
+duration: 25s
+rps: 20
+concurrency: 4
+requests:
+  - name: orders
+    method: GET
+    path: /api/orders
+    weight: 7
+    expect_status: 200
+  - name: orders-flaky
+    method: GET
+    path: /api/orders?flaky=1
+    weight: 3
+    expect_status: 500
+    class: flaky

@@ -1,0 +1,138 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: db-n-plus-one
+  title: "Список заказов делает запрос позиций на каждый заказ"
+  level: code
+  tags: [postgres, go, n-plus-one, query-pattern]
+  estimated_minutes: 35
+spec:
+  workspace: scenarios/db-n-plus-one/workspace
+  reference: scenarios/db-n-plus-one/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      # SQL access goes through exec inside the container, not a published
+      # port; the port is intentionally not published to the host.
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: queries-per-request-high
+      observation: "app_db_queries_per_request держится около 21: один запрос списка и по одному на каждый заказ"
+    - id: db-latency-grows
+      observation: "app_db_query_latency_p95_ms и app_db_queries_total растут пропорционально числу заказов, хотя данных мало"
+  hints:
+    - level: 1
+      text: "Сравните app_db_queries_total с app_requests_total и посмотрите на gauge app_db_queries_per_request"
+    - level: 2
+      text: "Посмотрите строку логов реплики списка: сколько обращений к БД у одного запроса"
+    - level: 3
+      text: "В обработчике списка позиции заказов выбираются в цикле по одному заказу: сбор данных должен быть одним запросом"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: orders-200
+        type: http
+        service: app
+        path: /api/orders
+        expect:
+          status: 200
+    quality:
+      - id: queries-per-request
+        type: metric
+        service: app
+        query: app_db_queries_per_request
+        agg: max
+        window:
+          from: 5s
+        expect:
+          max: 3
+        reason: "Список заказов должен собираться одним обращением к БД: 21 запрос на 20 заказов лягут на пул и латентность при любом росте данных"
+      - id: freshness
+        type: http
+        service: app
+        path: /debug/invariant/freshness
+        expect:
+          status: 200
+        reason: "Список обязан показывать только то, что есть в БД: ответ, отданный из кэша, теряет только что записанный заказ"
+      - id: single-round-trip
+        type: log
+        service: app
+        pattern: "round_trips=1"
+        reason: "Одна строка лога на запрос списка с единственным обращением к БД подтверждает, что N+1 нет, а не спрятан в кэше"
+  root_cause:
+    summary: "Обработчик списка выбирает 20 заказов, а затем позиции каждого заказа отдельным запросом в цикле: 21 обращение к БД на один HTTP-запрос."
+    layer: code
+    signals:
+      - "app_db_queries_per_request ≈ 21 при 20 заказах"
+      - "app_db_queries_total растёт пропорционально числу заказов"
+    masked_by: [add-cache, bigger-pool]
+  theory: |
+    N+1 — дефект уровня кода: список собирается из цикла запросов, и цена
+    одного HTTP-запроса растёт линейно с числом строк. На двадцати заказах
+    это незаметно, на двадцати тысячах — сколько угодно. Кэш ответа скрывает
+    симптом ровно до первой записи: список отдаётся устаревшим, и инвариант
+    свежести это ловит. Увеличение пула не меняет числа обращений, поэтому
+    gauge queries-per-request остаётся высоким.
+  reference_solution:
+    summary: "Собрать заказы и позиции одним запросом с JOIN (или WHERE order_id = ANY($1))"
+    steps:
+      - "Открыть scenarios/db-n-plus-one/workspace/app/handler.go (или сессионный workspace)"
+      - "Заменить цикл запросов позиций одним запросом: SELECT o.id, o.customer, o.total, p.sku FROM orders o LEFT JOIN order_positions p ON p.order_id = o.id ORDER BY o.id"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: add-cache
+      title: "Закэшировать ответ списка в памяти процесса, чтобы запросы не ходили в БД"
+      symptom: queries-per-request-high
+      masked_artifact: "актуальность списка заказов"
+      fails: freshness
+      apply:
+        kind: env
+        service: app
+        vars:
+          ORDERS_LIMIT: "1"
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX в приложении, чтобы пул выдерживал лишние запросы"
+      symptom: queries-per-request-high
+      masked_artifact: "размер пула соединений на стороне приложения"
+      fails: queries-per-request
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
+  replay:
+    profile: workloads/db-n-plus-one.yaml
+    duration: 25s
+    rps: 15

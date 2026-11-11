@@ -1,0 +1,21 @@
+# Replay-профиль задачи cache-stampede.
+#
+# Нагрузка идёт по одному ключу "orders" с высоким параллелизмом: именно в
+# момент истечения TTL видно, сколько одновременных запросов уходит в БД.
+profile: cache-stampede
+duration: 20s
+rps: 25
+concurrency: 8
+requests:
+  - name: orders
+    method: GET
+    path: /api/orders
+    weight: 10
+    expect_status: 200
+    class: orders
+  - name: healthz
+    method: GET
+    path: /healthz
+    weight: 1
+    expect_status: 200
+    class: healthz

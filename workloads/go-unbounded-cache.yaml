@@ -1,0 +1,30 @@
+profile: go-unbounded-cache
+duration: 25s
+rps: 20
+concurrency: 8
+requests:
+  - name: cache-key-1
+    method: GET
+    path: /api/cache?q=key-1
+    weight: 2
+    expect_status: 200
+  - name: cache-key-2
+    method: GET
+    path: /api/cache?q=key-2
+    weight: 2
+    expect_status: 200
+  - name: cache-key-3
+    method: GET
+    path: /api/cache?q=key-3
+    weight: 2
+    expect_status: 200
+  - name: cache-key-4
+    method: GET
+    path: /api/cache?q=key-4
+    weight: 2
+    expect_status: 200
+  - name: cache-key-5
+    method: GET
+    path: /api/cache?q=key-5
+    weight: 2
+    expect_status: 200

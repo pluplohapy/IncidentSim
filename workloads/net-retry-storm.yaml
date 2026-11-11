@@ -1,0 +1,17 @@
+profile: net-retry-storm
+duration: 25s
+rps: 15
+concurrency: 8
+requests:
+  - name: dep
+    method: GET
+    path: /api/dep
+    weight: 10
+    class: dep
+    expect_status: 200
+  - name: orders
+    method: GET
+    path: /api/orders
+    weight: 5
+    class: orders
+    expect_status: 200

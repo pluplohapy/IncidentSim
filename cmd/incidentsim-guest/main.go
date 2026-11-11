@@ -35,14 +35,14 @@ const (
 
 // serviceConfig is the environment of one service inside the guest.
 type serviceConfig struct {
-	Name    string            `json:"name"`
-	Image   string            `json:"image"`
-	Command []string          `json:"command,omitempty"`
+	Name    string   `json:"name"`
+	Image   string   `json:"image"`
+	Command []string `json:"command,omitempty"`
 	// Entrypoint replaces the default rootfs binary; it wins over Command
 	// when both are set, matching compose's entrypoint/command split.
 	Entrypoint []string          `json:"entrypoint,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Port      int               `json:"port,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Port       int               `json:"port,omitempty"`
 }
 
 // guestConfig is the whole configuration of a task microVM.

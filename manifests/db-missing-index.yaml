@@ -1,0 +1,134 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: db-missing-index
+  title: "Поиск заказов по пользователю сканирует две миллионы строк"
+  level: code
+  tags: [postgres, go, index, query-plan]
+  estimated_minutes: 40
+spec:
+  workspace: scenarios/db-missing-index/workspace
+  reference: scenarios/db-missing-index/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      # SQL access goes through exec inside the container, not a published
+      # port; the port is intentionally not published to the host.
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/migrations/002_indexes.sql, app/handler.go]
+  symptoms:
+    - id: query-latency-high
+      observation: "app_db_query_latency_p95_ms держится на сотнях миллисекунд, хотя запрос возвращает тысячу строк из двух миллионов"
+    - id: plan-scans-table
+      observation: "EXPLAIN запроса по user_id показывает Seq Scan по всей таблице orders"
+  hints:
+    - level: 1
+      text: "Посмотрите метрику app_db_query_latency_p95_ms и сравните её с числом возвращаемых строк"
+    - level: 2
+      text: "Спросите план запроса: EXPLAIN SELECT id FROM orders WHERE user_id = 42 — какой это доступ к таблице"
+    - level: 3
+      text: "Колонка предиката не покрыта индексом: вспомогательные индексы живут в app/migrations, и файл 002_indexes.sql пока пустой"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: orders-of-user-200
+        type: http
+        service: app
+        path: /api/orders?user_id=1
+        expect:
+          status: 200
+    quality:
+      - id: query-latency-bounded
+        type: metric
+        service: app
+        query: app_db_query_latency_p95_ms
+        agg: max
+        window:
+          from: 5s
+        expect:
+          max: 80
+        reason: "Тысяча строк по индексу доступна за единицы миллисекунд: чтение всей таблицы на каждый запрос не переживёт рост данных"
+      - id: plan-uses-index
+        type: exec
+        service: db
+        command:
+          ["psql","-v","ON_ERROR_STOP=1","-t","-A","postgresql://postgres:incidentsim@localhost:5432/orders?sslmode=disable","-c","EXPLAIN SELECT id FROM orders WHERE user_id = 42"]
+        expect:
+          matches: "Index Scan"
+        reason: "План запроса обязан показывать обращение к индексу по колонке предиката: остальное маскирует симптом, не меняя доступ к данным"
+  root_cause:
+    summary: "Запрос списка заказов фильтрует по user_id, но индекса на этой колонке нет: PostgreSQL читает всю таблицу из двух миллионов строк на каждый HTTP-запрос."
+    layer: code
+    signals:
+      - "app_db_query_latency_p95_ms в сотнях миллисекунд при тысяче возвращаемых строк"
+      - "EXPLAIN: Seq Scan on orders"
+    masked_by: [wrong-index, bigger-pool]
+  theory: |
+    Отсутствующий индекс — дефект уровня кода: схема объявлена миграциями
+    рабочей копии, и предикат самого частого запроса в ней не покрыт. План
+    выбирает seq scan, потому что других вариантов нет, и латентность растёт
+    линейно с таблицей. Индекс на другой колонке выглядит как remedies в
+    диффе, но план по-прежнему сканирует таблицу. Увеличение пула соединений
+    не меняет стоимость чтения: gauge латентности остаётся высоким.
+  reference_solution:
+    summary: "Добавить в app/migrations/002_indexes.sql индекс по колонке предиката (user_id)"
+    steps:
+      - "Открыть scenarios/db-missing-index/workspace/app/migrations/002_indexes.sql (или сессионный workspace)"
+      - "Добавить CREATE INDEX CONCURRENTLY IF NOT EXISTS orders_user_id_idx ON orders (user_id)"
+      - "incidentsim edit <session> app/migrations/002_indexes.sql && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/migrations/002_indexes.sql && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: wrong-index
+      title: "Создать индекс, чтобы в таблице появился вспомогательный индекс"
+      symptom: query-latency-high
+      masked_artifact: "план запроса по user_id"
+      fails: plan-uses-index
+      apply:
+        kind: sql
+        service: db
+        sql:
+          - "CREATE INDEX IF NOT EXISTS orders_total_idx ON orders (total)"
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX в приложении, чтобы пул переживал долгие запросы"
+      symptom: query-latency-high
+      masked_artifact: "размер пула соединений на стороне приложения"
+      fails: query-latency-bounded
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
+  replay:
+    profile: workloads/db-missing-index.yaml
+    duration: 25s
+    rps: 15

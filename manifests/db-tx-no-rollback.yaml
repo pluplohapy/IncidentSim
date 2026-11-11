@@ -1,0 +1,131 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: db-tx-no-rollback
+  title: "Соединение остаётся в открытой транзакции после раннего выхода"
+  level: code
+  tags: [postgres, go, transaction, connection-pool]
+  estimated_minutes: 30
+spec:
+  workspace: scenarios/db-tx-no-rollback/workspace
+  reference: scenarios/db-tx-no-rollback/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+      # SQL access goes through exec inside the container, not a published
+      # port; the port is intentionally not published to the host.
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: errors-5xx
+      observation: "GET /api/orders?flaky=1 отвечает 500, после чего обычные GET /api/orders начинают отвечать 500: app_db_pool_in_use упирается в app_db_pool_max"
+  hints:
+    - level: 1
+      text: "Сравните метрики app_db_pool_in_use и app_db_pool_max"
+    - level: 2
+      text: "Посмотрите pg_stat_activity: соединения app висят в состоянии idle in transaction и не возвращаются в пул"
+    - level: 3
+      text: "В обработчике заказов ранний выход по ?flaky=1 происходит до закрытия транзакции: соединение остаётся в ней навсегда"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: orders-200
+        type: http
+        service: app
+        path: /api/orders
+        expect:
+          status: 200
+    quality:
+      - id: pool-in-use-not-maxed
+        type: metric
+        service: app
+        query: app_db_pool_in_use
+        agg: max
+        window:
+          from: 5s
+        expect:
+          max: 5
+        reason: "Пула хватает на заявленную нагрузку, когда соединения возвращаются: лимит пула не должен исчерпываться"
+      - id: idle-in-transaction-bounded
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction' AND application_name = 'app'"
+        expect:
+          max: 2
+        reason: "Соединения приложения в idle in transaction после ответа подтверждают, что транзакция не закрыта в коде"
+  root_cause:
+    summary: "Обработчик заказов открывает транзакцию и на раннем выходе (?flaky=1) отвечает 500 без закрытия транзакции: соединение навсегда остаётся в idle in transaction, пул исчерпывается."
+    layer: code
+    signals:
+      - "app_db_pool_in_use == app_db_pool_max"
+      - "pg_stat_activity: соединения app в состоянии idle in transaction"
+    masked_by: [bigger-pool, restart-only]
+  theory: |
+    Незакрытая транзакция — дефект уровня кода: пул берёт соединение, работает
+    с ним и на одном из путей выхода не откатывает транзакцию. Первое, что
+    видит участник, — 500 на обычных запросах и пул в максимуме, хотя нагрузка
+    умеренная. Диагностика идёт по метрикам app_db_pool_in_use относительно
+    app_db_pool_max и по pg_stat_activity.
+    "Раздуть POOL_MAX" убирает симптом и оставляет причину: утечка соединений
+    съест и новый лимит, просто позже. Перезапуск сервиса освобождает
+    соединения до первого же запроса с ?flaky=1.
+  reference_solution:
+    summary: "Добавить defer tx.Rollback() сразу после db.Begin(), чтобы транзакция закрывалась на любом пути выхода"
+    steps:
+      - "Открыть scenarios/db-tx-no-rollback/workspace/app/handler.go (или сессионный workspace)"
+      - "Добавить defer tx.Rollback() сразу после db.BeginTx: ранний выход по ?flaky=1 тогда тоже вернёт соединение в пул"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX в приложении, чтобы соединений хватало"
+      symptom: errors-5xx
+      masked_artifact: "размер пула соединений на стороне приложения"
+      fails: pool-in-use-not-maxed
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
+    - id: restart-only
+      title: "Перезапустить сервис app, чтобы освободить соединения"
+      symptom: errors-5xx
+      masked_artifact: "состояние пула соединений в памяти приложения"
+      fails: idle-in-transaction-bounded
+      apply:
+        kind: restart
+        service: app
+  replay:
+    profile: workloads/db-tx-no-rollback.yaml
+    duration: 25s
+    rps: 20

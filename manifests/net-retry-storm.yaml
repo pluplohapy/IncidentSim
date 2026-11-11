@@ -1,0 +1,157 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: net-retry-storm
+  title: "Ретраи к зависимости без лимита и без backoff"
+  level: code
+  tags: [go, http, retry, resilience]
+  estimated_minutes: 30
+spec:
+  workspace: scenarios/net-retry-storm/workspace
+  reference: scenarios/net-retry-storm/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: depstub
+      image: incidentsim/workload:dev
+      entrypoint: ["incidentsim-depstub"]
+      env:
+        PORT: "9090"
+      ports: [9090]
+      healthcheck:
+        path: /healthz
+        port: 9090
+        interval_seconds: 5
+        timeout_seconds: 2
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        DB_APP_NAME: "app"
+        POOL_MAX: "20"
+        DEP_HOST: depstub
+        DEP_PORT: "9090"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: dep-calls-spike
+      observation: "GET /api/dep отвечает медленно под сбоями зависимости, метрика app_dep_calls_total растёт во много раз быстрее пользовательского трафика"
+  hints:
+    - level: 1
+      text: "Сравните app_requests_total с app_dep_calls_total: вызовы к depstub умножаются относительно входящих запросов"
+    - level: 2
+      text: "Найдите в app/handler.go цикл, который повторяет вызов зависимости при ошибке или таймауте"
+    - level: 3
+      text: "Цикл не имеет ни счётчика попыток, ни паузы между вызовами — ограничьте число попыток и добавьте backoff с jitter"
+  fault:
+    type: sql_config
+    target: db
+    trigger: on_start
+    options:
+      statements:
+        - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+        - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 1000) g"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: dep-200
+        type: http
+        service: app
+        path: /api/dep
+        expect:
+          status: 200
+    quality:
+      - id: dep-calls-bounded
+        type: metric
+        service: app
+        query: app_dep_calls_total
+        agg: delta
+        expect:
+          max: 400
+        reason: "Под сбоями зависимости вызовы depstub не должны умножаться ретраями: ограничьте попытки, иначе один запрос порождает шторм"
+      - id: dep-error-rate
+        type: replay
+        field: error_rate
+        class: dep
+        expect:
+          max: 0.005
+        reason: "Под транзиентными сбоями /api/dep всё равно должен отвечать 200: сдаваться на первой ошибке нельзя, это теряет устойчивость"
+      - id: retry-effort-bounded
+        type: exec
+        service: app
+        command: ["sh", "-c", "grep -aq 'bounded retry' /usr/local/bin/app && echo found || echo missing"]
+        expect:
+          equals: "found"
+        reason: "Ограниченный backoff — это поведение в коде: поставленный бинарник должен содержать путь с ограниченными ретраями; env-переключатель и рестарт этого артефакта не меняют"
+  root_cause:
+    summary: "Обработчик /api/dep повторяет вызов зависимости в бесконечном цикле без счётчика попыток и без паузы, поэтому каждый упавший вызов превращается в шторм запросов к depstub."
+    layer: code
+    signals:
+      - "app_dep_calls_total растёт на порядок быстрее app_requests_total"
+      - "app_retry_requests под сбоями растёт без ограничений"
+    masked_by: [disable-retries]
+  theory: |
+    Ретраи — необходимый элемент устойчивости, но без лимита и без backoff
+    транзиентный сбой зависимости превращается в лавину: один пользовательский
+    запрос порождает десятки вызовов, и зависимость, которая могла бы
+    восстановиться, получает ещё большую нагрузку. Правильное поведение —
+    ограниченное число попыток с экспоненциальным backoff и jitter и быстрый
+    ответ-заглушка на случай неудачи, а не «ретраить до победного» и не
+    «отключить ретраи совсем».
+  reference_solution:
+    summary: "Ограничить цикл тремя попытками, добавить экспоненциальный backoff (50мс*2^n) с jitter и быстрый fallback"
+    steps:
+      - "Откройте scenarios/net-retry-storm/workspace/app/handler.go (или сессионный workspace)"
+      - "Замените бесконечный цикл на цикл с максимум тремя попытками"
+      - "Добавьте паузу с экспоненциальным ростом и jitter между попытками"
+      - "При исчерпании попыток отдайте быстрый ответ 200 из запасного источника, не долбя зависимость"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторите incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: disable-retries
+      title: "Отключить ретраи через RETRY_ENABLED=false — шторм прекратится"
+      symptom: dep-calls-spike
+      masked_artifact: "устойчивость к транзиентным сбоям зависимости"
+      fails: dep-error-rate
+      apply:
+        kind: env
+        service: app
+        vars:
+          RETRY_ENABLED: "false"
+  replay:
+    profile: workloads/net-retry-storm.yaml
+    duration: 25s
+    rps: 15
+    hooks:
+      - at: 6s
+        do: stub_control
+        service: depstub
+        body: '{"error_rate":0.8}'
+      - at: 20s
+        do: stub_control
+        service: depstub
+        body: '{"error_rate":0,"latency_ms":0,"hang_pct":0,"hang_ms":0,"down":false}'

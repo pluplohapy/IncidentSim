@@ -104,17 +104,17 @@ type RuntimeSpec struct {
 
 // ServiceSpec is one process of the task environment.
 type ServiceSpec struct {
-	Name        string            `yaml:"name" json:"name"`
-	Image       string            `yaml:"image" json:"image"`
-	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	Ports       []int             `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command     []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	Name    string            `yaml:"name" json:"name"`
+	Image   string            `yaml:"image" json:"image"`
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Ports   []int             `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command []string          `yaml:"command,omitempty" json:"command,omitempty"`
 	// Entrypoint overrides the image ENTRYPOINT. A task image may declare an
 	// ENTRYPOINT the manifest must replace (for example the workload image
 	// defaults to the legacy service while a dep-stack service is the
 	// depstub): compose `command` alone only appends arguments.
-	Entrypoint []string          `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
-	Healthcheck *Healthcheck      `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
+	Entrypoint  []string     `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
+	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
 }
 
 // Healthcheck describes how the adapter decides a service is usable.

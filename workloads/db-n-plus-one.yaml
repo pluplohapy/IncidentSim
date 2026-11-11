@@ -1,0 +1,10 @@
+profile: db-n-plus-one
+duration: 25s
+rps: 15
+concurrency: 4
+requests:
+  - name: orders
+    method: GET
+    path: /api/orders
+    weight: 10
+    expect_status: 200

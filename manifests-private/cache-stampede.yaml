@@ -1,0 +1,144 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: cache-stampede
+  title: "Cache stampede: истёкший ключ роняет все запросы в БД"
+  level: code
+  tags: [postgres, go, cache, singleflight]
+  estimated_minutes: 30
+spec:
+  workspace: scenarios/cache-stampede/workspace
+  reference: scenarios/cache-stampede/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        CACHE_TTL_SECONDS: "2"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: db-load-spike
+      observation: "GET /api/orders: как только TTL снапшота истекает, все одновременные запросы идут в БД — app_db_queries_per_request всплескивает, app_db_queries_total растёт рывками"
+  hints:
+    - level: 1
+      text: "Сравните метрики app_db_queries_per_request и app_cache_hits_total во время реплея"
+    - level: 2
+      text: "В логах app найдите строки cache fill: параметр herd показывает, сколько запросов грузят снапшот одновременно"
+    - level: 3
+      text: "Кэш — map с TTL без дедупликации загрузки: каждый параллельный запрос одного ключа читает БД сам. Нужен singleflight и джиттер TTL"
+  fault:
+    type: sql_config
+    target: db
+    trigger: on_start
+    options:
+      statements:
+        - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+        - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 100000) g WHERE NOT EXISTS (SELECT 1 FROM orders)"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+    quality:
+      - id: stampede-queries-bounded
+        type: metric
+        service: app
+        query: app_db_queries_per_request
+        agg: max
+        window:
+          from: 5s
+        expect:
+          max: 3
+        reason: "Шторм должен быть устранён дедупликацией загрузки, а не спрятан ростом пула: запросов к БД на запрос должно оставаться мало"
+      - id: read-after-write-fresh
+        type: http
+        service: app
+        path: /debug/invariant/freshness
+        expect:
+          status: 200
+        reason: "Раздутый TTL отдаёт устаревшее чтение: инвариант требует, чтобы запись была видна в чтении внутри окна TTL"
+      - id: cache-fill-deduplicated
+        type: log
+        service: app
+        pattern: "cache fill key=orders herd=1"
+        reason: "Артефакт фикса: загрузка снапшота дедуплицирована — в логе видно herd=1, а не стая параллельных загрузок одного ключа"
+  root_cause:
+    summary: "Снапшот заказов кэшируется в map с TTL 2с без дедупликации: когда TTL истекает, каждый одновременный запрос самостоятельно читает БД, и один истёкший ключ выстреливает пачкой запросов."
+    layer: code
+    signals:
+      - "app_db_queries_per_request всплескивает каждые ~2 с и держится выше нормы"
+      - "лог app: cache fill key=orders herd=N с N > 1"
+      - "app_cache_hits_total почти не растёт между всплесками"
+    masked_by: [longer-ttl, bigger-pool]
+  theory: |
+    Stampede — цена нескоординированного кэша. Пока запись живёт, все читают
+    её из памяти; в момент истечения TTL все, кто пришёл в этот момент,
+    одновременно идут в БД, и один ключ превращается в пачку тяжелых
+    запросов. Лечение — дедупликация загрузки (singleflight): первый запрос
+    читает БД, остальные ждут его результат. Джиттер TTL разводит моменты
+    истечения по времени, чтобы экспирация не совпала у всех ключей сразу.
+
+    Дистракторы прячут симптом, а не причину. «Увеличить TTL» убирает шторм
+    ценою свежести: чтения отстают от записи на весь новый TTL, и quality-gate
+    ловит это инвариантом read-after-write. «Увеличить POOL_MAX» даёт пулу
+    запас, но запросов на ключ становится не меньше: gauges остаются теми же.
+  reference_solution:
+    summary: "Обернуть загрузку снапшота в singleflight.Group и добавить джиттер TTL при записи в кэш"
+    steps:
+      - "Открыть scenarios/cache-stampede/workspace/app/handler.go (или сессионный workspace)"
+      - "Обернуть тело загрузки снапшота в fillGroup.Do(\"orders\", ...) и вернуть признак shared, чтобы только лидер считал запросы к БД"
+      - "Записать снапшот с TTL, размазанным джиттером ±20%"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: longer-ttl
+      title: "Увеличить CACHE_TTL_SECONDS до 3600 — шторм пропадает"
+      symptom: db-load-spike
+      masked_artifact: "свежесть прочитанных данных"
+      fails: read-after-write-fresh
+      apply:
+        kind: env
+        service: app
+        vars:
+          CACHE_TTL_SECONDS: "3600"
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX до 100 — пул абсорбирует шторм"
+      symptom: db-load-spike
+      masked_artifact: "нагрузка на БД от параллельных загрузок одного ключа"
+      fails: stampede-queries-bounded
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
+  replay:
+    profile: workloads/cache-stampede.yaml
+    duration: 20s
+    rps: 25

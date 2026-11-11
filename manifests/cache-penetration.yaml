@@ -1,0 +1,151 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: cache-penetration
+  title: "Cache penetration: отсутствующий id минует кэш"
+  level: code
+  tags: [postgres, go, cache, negative-cache]
+  estimated_minutes: 25
+spec:
+  workspace: scenarios/cache-penetration/workspace
+  reference: scenarios/cache-penetration/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        CACHE_TTL_SECONDS: "5"
+        NEGATIVE_TTL_SECONDS: "5"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: missing-id-db-load
+      observation: "GET /api/orders/<id> на несуществующий id каждый раз идёт в БД: app_db_queries_total растёт линейно по времени, хотя ответ всегда 404"
+  hints:
+    - level: 1
+      text: "Сравните app_db_queries_total с числом запросов: какие из них идут в БД при одном и том же ответе?"
+    - level: 2
+      text: "В логах app найдите cache fill со status=404: ключ отсутствующего заказа заполняется, но не сохраняется"
+    - level: 3
+      text: "Кэш хранит только найденные ответы. Добавьте отрицательный кэш: отсутствующий id - такой же ответ, и его надо хранить на свой TTL"
+  fault:
+    type: sql_config
+    target: db
+    trigger: on_start
+    options:
+      statements:
+        - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+        - "CREATE TABLE IF NOT EXISTS orders_archive (id integer primary key, customer text, total numeric, archived_at timestamptz default now())"
+        - "CREATE TABLE IF NOT EXISTS order_events (id serial primary key, order_id integer not null, kind text not null, created_at timestamptz default now())"
+        - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 1000) g WHERE NOT EXISTS (SELECT 1 FROM orders)"
+        - "INSERT INTO orders_archive (id, customer, total) SELECT g, 'archived-' || g, g * 5 FROM generate_series(900000, 900005) g WHERE NOT EXISTS (SELECT 1 FROM orders_archive)"
+        - "INSERT INTO order_events (order_id, kind) SELECT g, 'created' FROM generate_series(1, 1000) g WHERE NOT EXISTS (SELECT 1 FROM order_events)"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: order-found-200
+        type: http
+        service: app
+        path: /api/orders/1
+        expect:
+          status: 200
+    quality:
+      - id: missing-queries-bounded
+        type: metric
+        service: app
+        query: app_db_queries_per_request
+        agg: max
+        window:
+          from: 5s
+        expect:
+          max: 2
+        reason: "Отрицательный ответ должен кэшироваться: иначе каждый запрос отсутствующего id снова выполняет полный обход таблиц жизненного цикла"
+      - id: fresh-after-create
+        type: http
+        service: app
+        path: /debug/invariant/freshness
+        expect:
+          status: 200
+        reason: "Кэш «404 навсегда» прячет симптом, но после создания заказа чтение обязано сразу увидеть новую строку"
+      - id: negative-cache-serving
+        type: log
+        service: app
+        pattern: "negative cache hit"
+        reason: "Артефакт фикса: отрицательные ответы действительно отдаются из кэша, а не заново вычисляются каждый раз"
+  root_cause:
+    summary: "Кэш хранит только найденные заказы: отсутствующий id не кэшируется, и каждый запрос пробития заново выполняет полный обход активной таблицы, архива и истории событий."
+    layer: code
+    signals:
+      - "app_db_queries_per_request держится около стоимости полного lookup при ответах 404"
+      - "лог app: cache fill ... status=404 повторяется на каждый запрос"
+      - "лог app: negative cache hit отсутствует"
+    masked_by: [bigger-pool, cache-everything]
+  theory: |
+    Penetration — обратная сторона кэша: клиент спрашивает id, которых нет, и
+    каждый такой запрос проходит кэш насквозь и стоит полного обхода таблиц.
+    Ответ «нет такого» — такой же кэшируемый факт, как и найденный заказ:
+    отрицательный кэш с коротким TTL съедает пробой целиком.
+
+    Дистракторы: «увеличить пул» даёт запас соединений, но запросов к БД не
+    убывает; «кэшировать всё навсегда» убирает и пробой, и свежесть — после
+    создания заказ остаётся 404, что ловит инвариант read-after-create.
+  reference_solution:
+    summary: "Кэшировать отрицательный ответ (404) на свой TTL и инвалидировать запись при создании заказа"
+    steps:
+      - "Открыть scenarios/cache-penetration/workspace/app/handler.go (или сессионный workspace)"
+      - "Добавить cachePutNegative: ответ 404 сохраняется в том же кэше с TTL NEGATIVE_TTL_SECONDS"
+      - "Сохранение делать для обоих исходов lookup, а не только для найденного заказа"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX до 100 — соединений хватит на пробой"
+      symptom: missing-id-db-load
+      masked_artifact: "нагрузка на БД от постоянных lookup'ов отсутствующих id"
+      fails: missing-queries-bounded
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
+    - id: cache-everything
+      title: "Кэшировать и найденные, и отсутствующие ответы навсегда"
+      symptom: missing-id-db-load
+      masked_artifact: "свежесть чтения после записи"
+      fails: fresh-after-create
+      apply:
+        kind: files
+        from: handler.go
+        to: app/handler.go
+  replay:
+    profile: workloads/cache-penetration.yaml
+    duration: 20s
+    rps: 12

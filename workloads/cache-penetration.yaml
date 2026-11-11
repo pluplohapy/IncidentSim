@@ -1,0 +1,27 @@
+# Replay-профиль задачи cache-penetration.
+#
+# Половина трафика — существующий заказ, половина — заведомо отсутствующий
+# id: именно он и проходит мимо кэша, если отрицательные ответы не кэшируются.
+profile: cache-penetration
+duration: 20s
+rps: 12
+concurrency: 6
+requests:
+  - name: order-found
+    method: GET
+    path: /api/orders/1
+    weight: 5
+    expect_status: 200
+    class: found
+  - name: order-missing
+    method: GET
+    path: /api/orders/999999
+    weight: 5
+    expect_status: 404
+    class: missing
+  - name: healthz
+    method: GET
+    path: /healthz
+    weight: 1
+    expect_status: 200
+    class: healthz

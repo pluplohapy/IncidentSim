@@ -1,0 +1,16 @@
+profile: db-idempotent-create
+duration: 25s
+rps: 10
+concurrency: 4
+requests:
+  - name: create-order
+    method: POST
+    path: /api/orders
+    weight: 5
+    expect_status: 200
+    body: '{"client_key":"k-1","customer":"acme","total":42.5}'
+  - name: list-orders
+    method: GET
+    path: /api/orders
+    weight: 5
+    expect_status: 200

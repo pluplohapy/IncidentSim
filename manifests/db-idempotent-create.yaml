@@ -1,0 +1,141 @@
+apiVersion: incidentsim/v1
+kind: Incident
+metadata:
+  id: db-idempotent-create
+  title: "POST /api/orders создаёт дубли при повторной отправке"
+  level: code
+  tags: [postgres, go, idempotency]
+  estimated_minutes: 30
+spec:
+  workspace: scenarios/db-idempotent-create/workspace
+  reference: scenarios/db-idempotent-create/reference
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        DB_APP_NAME: "app"
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
+  symptoms:
+    - id: duplicate-orders
+      observation: "Повторный POST /api/orders с тем же client_key добавляет ещё одну строку: счётчик GET /api/orders растёт на каждое повторное тело запроса, в таблице несколько строк с одним client_key"
+    - id: retried-orders-500
+      observation: "После ретрая/реплея того же запроса заказ дублируется, а не возвращается ранее созданный"
+  hints:
+    - level: 1
+      text: "Сравните число строк в orders с числом уникальных client_key"
+    - level: 2
+      text: "Посмотрите /debug/invariant/idempotency: хранит ли база сама гарантию уникальности client_key"
+    - level: 3
+      text: "В обработчике INSERT выполняется без учёта уже сохранённого client_key — идемпотентность держится только там, где данные лежат"
+  verify:
+    correctness:
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
+      - id: create-order-200
+        type: http
+        service: app
+        method: POST
+        path: /api/orders
+        expect:
+          status: 200
+    quality:
+      - id: id-duplicates-zero
+        type: sql
+        service: db
+        sql: "SELECT count(*) FROM (SELECT client_key FROM orders GROUP BY client_key HAVING count(*) > 1) t"
+        expect:
+          max: 0
+        reason: "Дубли в orders — артефакт отсутствующего уникального ограничения: маскировать его перезапуском или памятью процесса нельзя"
+      - id: id-db-writes-required
+        type: metric
+        service: app
+        query: app_db_queries_per_request
+        agg: min
+        window:
+          from: 5s
+        expect:
+          min: 1
+        reason: "Фильтр повторов в памяти процесса перестаёт писать в базу: идемпотентность обязана исходить из хранимых данных, иначе она теряется при рестарте"
+      - id: id-create-error-rate
+        type: replay
+        service: app
+        field: error_rate
+        expect:
+          max: 0.005
+        reason: "Создание заказа под нагрузкой не должно отвечать ошибкой: участник чинит обработчик, а не глушит трафик"
+  root_cause:
+    summary: "Обработчик заказов выполняет INSERT без ON CONFLICT, а в таблице orders нет уникального индекса на client_key: повторная отправка того же тела создаёт вторую строку вместо возврата существующего заказа."
+    layer: code
+    signals:
+      - "в orders несколько строк с одинаковым client_key"
+      - "GET /api/orders считает повторы одного и того же заказа"
+      - "/debug/invariant/idempotency сообщает, что уникального ограничения нет"
+    masked_by: [in-memory-dedupe, restart-only]
+  theory: |
+    Идемпотентность создания — свойство хранимых данных, а не процесса. Пока в
+    таблице нет уникального ограничения, любой повторный запрос (клиентский
+    ретрай, реплей нагрузки, повторная доставка события) пишет ещё одну строку.
+    Участник видит это как расхождение между числом заказов и числом клиентов.
+    Перезапуск сервиса снимает симптом ровно до следующего повтора, а набор
+    «уже видел такой ключ» в памяти процесса теряется вместе с процессом —
+    качественные проверки ловят и то и другое.
+  reference_solution:
+    summary: "Обеспечить уникальность client_key в базе и сделать INSERT конфликтобезопасным: ON CONFLICT (client_key) DO NOTHING + возврат существующей строки"
+    steps:
+      - "Открыть scenarios/db-idempotent-create/workspace/app/handler.go (или сессионный workspace)"
+      - "Привести orders к одной строке на client_key и создать уникальный индекс orders_client_key_key"
+      - "INSERT ... ON CONFLICT (client_key) DO NOTHING, затем выбрать сохранённую строку по client_key и вернуть её"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
+    commands:
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
+      - "incidentsim verify <session>"
+  distractors:
+    - id: in-memory-dedupe
+      title: "Держать набор уже принятых client_key в памяти процесса"
+      symptom: duplicate-orders
+      masked_artifact: "гарантия уникальности client_key в базе (её заменяет память процесса)"
+      fails: id-db-writes-required
+      apply:
+        kind: env
+        service: app
+        vars:
+          DEDUPE_MODE: "memory"
+    - id: restart-only
+      title: "Перезапустить сервис app, чтобы повторы «исчезли»"
+      symptom: duplicate-orders
+      masked_artifact: "строки-дубли в таблице orders (перезапуск их не убирает)"
+      fails: id-duplicates-zero
+      apply:
+        kind: restart
+        service: app
+  replay:
+    profile: workloads/db-idempotent-create.yaml
+    duration: 25s
+    rps: 10
+    concurrency: 4

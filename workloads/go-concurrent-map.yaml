@@ -1,0 +1,45 @@
+profile: go-concurrent-map
+duration: 25s
+rps: 20
+concurrency: 4
+requests:
+  - name: count-1
+    method: GET
+    path: /api/count?k=1
+    weight: 2
+    expect_status: 200
+  - name: count-2
+    method: GET
+    path: /api/count?k=2
+    weight: 2
+    expect_status: 200
+  - name: count-3
+    method: GET
+    path: /api/count?k=3
+    weight: 2
+    expect_status: 200
+  - name: count-4
+    method: GET
+    path: /api/count?k=4
+    weight: 2
+    expect_status: 200
+  - name: count-5
+    method: GET
+    path: /api/count?k=5
+    weight: 2
+    expect_status: 200
+  - name: count-6
+    method: GET
+    path: /api/count?k=6
+    weight: 2
+    expect_status: 200
+  - name: count-7
+    method: GET
+    path: /api/count?k=7
+    weight: 2
+    expect_status: 200
+  - name: count-8
+    method: GET
+    path: /api/count?k=8
+    weight: 2
+    expect_status: 200
