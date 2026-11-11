@@ -238,3 +238,18 @@ func section(document, header string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+func TestProjectRendersEntrypointOverride(t *testing.T) {
+	spec := testSpec()
+	spec.Services[0].Entrypoint = []string{"incidentsim-depstub"}
+	document := Project("incidentsim-test", "incidentsim-test", spec)
+	if !strings.Contains(document, `entrypoint: ["incidentsim-depstub"]`) {
+		t.Fatalf("compose document does not declare the entrypoint override:\n%s", document)
+	}
+	// Without a declared entrypoint the override must not leak into services
+	// that do not ask for it.
+	plain := Project("incidentsim-test", "incidentsim-test", testSpec())
+	if strings.Contains(plain, "entrypoint:") {
+		t.Fatalf("compose document declares an entrypoint the manifest never asked for:\n%s", plain)
+	}
+}

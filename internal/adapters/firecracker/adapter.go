@@ -334,11 +334,12 @@ func (a *Adapter) writeGuestConfig(machine *vm) error {
 			port = service.Ports[0]
 		}
 		config.Services = append(config.Services, guestService{
-			Name:    service.Name,
-			Image:   service.Image,
-			Command: service.Command,
-			Env:     service.Env,
-			Port:    port,
+			Name:       service.Name,
+			Image:      service.Image,
+			Command:    service.Command,
+			Entrypoint: service.Entrypoint,
+			Env:        service.Env,
+			Port:       port,
 		})
 	}
 	data, err := json.MarshalIndent(config, "", "  ")

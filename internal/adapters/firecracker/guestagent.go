@@ -19,8 +19,11 @@ type guestService struct {
 	Name    string            `json:"name"`
 	Image   string            `json:"image"`
 	Command []string          `json:"command,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Port    int               `json:"port,omitempty"`
+	// Entrypoint replaces the default binary of the rootfs, which compose
+	// semantics express through entrypoint rather than command.
+	Entrypoint []string          `json:"entrypoint,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Port      int               `json:"port,omitempty"`
 }
 
 // postJSON writes one JSON request to the guest agent.

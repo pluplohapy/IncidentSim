@@ -246,6 +246,7 @@ func (o *Orchestrator) runtimeSpec(task *manifest.Manifest) runtime.Spec {
 			Env:         declared.Env,
 			Ports:       declared.Ports,
 			Command:     declared.Command,
+			Entrypoint:  declared.Entrypoint,
 			Healthcheck: projectHealthcheck(declared.Healthcheck),
 		})
 	}

@@ -109,6 +109,11 @@ type ServiceSpec struct {
 	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	Ports       []int             `yaml:"ports,omitempty" json:"ports,omitempty"`
 	Command     []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	// Entrypoint overrides the image ENTRYPOINT. A task image may declare an
+	// ENTRYPOINT the manifest must replace (for example the workload image
+	// defaults to the legacy service while a dep-stack service is the
+	// depstub): compose `command` alone only appends arguments.
+	Entrypoint []string          `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
 	Healthcheck *Healthcheck      `yaml:"healthcheck,omitempty" json:"healthcheck,omitempty"`
 }
 

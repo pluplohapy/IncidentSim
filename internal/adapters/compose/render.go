@@ -52,6 +52,15 @@ func writeService(b *strings.Builder, projectDir string, service runtime.Service
 		b.WriteString("\n")
 	}
 
+	// An image ENTRYPOINT cannot be replaced by compose `command` (that only
+	// appends arguments), so a manifest that must run a different binary from
+	// the same image declares entrypoint explicitly.
+	if len(service.Entrypoint) > 0 {
+		b.WriteString("    entrypoint: ")
+		b.WriteString(yamlList(service.Entrypoint))
+		b.WriteString("\n")
+	}
+
 	env := mergedEnv(service.Env, faultEnv)
 	if len(env) > 0 {
 		b.WriteString("    environment:\n")

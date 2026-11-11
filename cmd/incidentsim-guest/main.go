@@ -38,8 +38,11 @@ type serviceConfig struct {
 	Name    string            `json:"name"`
 	Image   string            `json:"image"`
 	Command []string          `json:"command,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Port    int               `json:"port,omitempty"`
+	// Entrypoint replaces the default rootfs binary; it wins over Command
+	// when both are set, matching compose's entrypoint/command split.
+	Entrypoint []string          `json:"entrypoint,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Port      int               `json:"port,omitempty"`
 }
 
 // guestConfig is the whole configuration of a task microVM.
@@ -440,6 +443,9 @@ func (a *agent) startLocked(service serviceConfig) error {
 		proc.env[key] = value
 	}
 	command := service.Command
+	if len(service.Entrypoint) > 0 {
+		command = append(append([]string(nil), service.Entrypoint...), command...)
+	}
 	if len(command) == 0 {
 		command = []string{"/usr/local/bin/incidentsim-workload"}
 	}

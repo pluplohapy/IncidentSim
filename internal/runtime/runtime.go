@@ -219,11 +219,14 @@ type Spec struct {
 
 // ServiceSpec is one service to run.
 type ServiceSpec struct {
-	Name        string
-	Image       string
-	Env         map[string]string
-	Ports       []int
-	Command     []string
+	Name     string
+	Image    string
+	Env      map[string]string
+	Ports    []int
+	Command  []string
+	// Entrypoint overrides the image ENTRYPOINT, which compose `command`
+	// cannot do on its own.
+	Entrypoint  []string
 	Healthcheck *HealthcheckSpec
 }
 
