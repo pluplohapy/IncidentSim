@@ -164,6 +164,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleReset(w, r, session)
 	case "postmortem":
 		s.handlePostmortem(w, r, session)
+	case "diff":
+		s.handleDiff(w, r, session)
 	case "stop":
 		s.handleStop(w, r, session)
 	default:
@@ -284,6 +286,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request, session *Ses
 		Command   []string `json:"command"`
 		Statement string   `json:"statement"`
 		TimeoutMS int      `json:"timeout_ms"`
+		TTY       bool     `json:"tty"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
@@ -305,7 +308,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request, session *Ses
 		return
 	}
 	timeout := time.Duration(body.TimeoutMS) * time.Millisecond
-	result, err := s.Orchestrator.Exec(r.Context(), session.ID, body.Service, command, timeout)
+	result, err := s.Orchestrator.Exec(r.Context(), session.ID, runtime.ExecRequest{
+		Service: body.Service,
+		Command: command,
+		Timeout: timeout,
+		TTY:     body.TTY,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), strings.TrimSpace(result.Stderr))
 		return
@@ -360,6 +368,19 @@ func (s *Server) handlePostmortem(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	writeJSON(w, http.StatusOK, postmortem)
+}
+
+func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	diff, err := s.Orchestrator.Diff(session.ID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"diff": diff})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request, session *Session) {

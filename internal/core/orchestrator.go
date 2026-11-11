@@ -659,66 +659,15 @@ func (o *Orchestrator) configArtifact(session *Session) (runtime.Artifact, error
 // the scenario workspace, so the journal shows what changed rather than the
 // full contents of every file.
 func (o *Orchestrator) journalWorkspaceDiff(session *Session) error {
-	src := o.scenarioWorkspaceDir(session)
-	dst := session.WorkspaceDir
-	if src == "" || dst == "" {
-		return nil
-	}
-	var diff strings.Builder
-	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		scenarioData, serr := os.ReadFile(path)
-		dstData, derr := os.ReadFile(filepath.Join(dst, rel))
-		switch {
-		case serr != nil:
-			// file exists in scenario but not in workspace: deletion
-			fmt.Fprintf(&diff, "--- %s\n+++ /dev/null\n- %s\n", rel, string(scenarioData))
-		case derr != nil:
-			// file exists in workspace but not in scenario: addition
-			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n+ %s\n", rel, string(scenarioData))
-		default:
-			if bytes.Equal(scenarioData, dstData) {
-				return nil
-			}
-			fmt.Fprintf(&diff, "--- %s\n+++ %s\n@@\n- %s\n+ %s\n", rel, rel, string(scenarioData), string(dstData))
-		}
-		return nil
-	})
+	diff, err := o.workspaceDiffText(session)
 	if err != nil {
 		return err
 	}
-	// Also report files added in the workspace that are not in the scenario.
-	err = filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(dst, path)
-		if err != nil {
-			return err
-		}
-		if _, serr := os.ReadFile(filepath.Join(src, rel)); serr != nil {
-			data, derr := os.ReadFile(path)
-			if derr != nil {
-				return derr
-			}
-			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n+ %s\n", rel, string(data))
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if diff.Len() == 0 {
+	if diff == "" {
 		return nil
 	}
 	session.journal.Record(EventApplyStarted, "workspace diff", map[string]any{
-		"diff": diff.String(),
+		"diff": diff,
 	})
 	return nil
 }
@@ -735,6 +684,70 @@ func (o *Orchestrator) waitForHealth(ctx context.Context, session *Session, adap
 	return runtime.WaitForHealth(ctx, instance, runtime.DefaultResetTimeout)
 }
 
+// Diff returns the unified diff of the session workspace against the scenario
+// workspace, so `incidentsim diff <session>` shows what the participant
+// changed without dumping full file contents.
+func (o *Orchestrator) Diff(sessionID string) (string, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return o.workspaceDiffText(session)
+}
+
+// workspaceDiffText builds the unified diff of dst (session workspace) against
+// src (scenario workspace). It does not journal; callers that want an audit
+// trail use journalWorkspaceDiff instead.
+func (o *Orchestrator) workspaceDiffText(session *Session) (string, error) {
+	src := o.scenarioWorkspaceDir(session)
+	dst := session.WorkspaceDir
+	if src == "" || dst == "" {
+		return "", nil
+	}
+	var diff strings.Builder
+	_ = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		scenarioData, serr := os.ReadFile(path)
+		dstData, derr := os.ReadFile(filepath.Join(dst, rel))
+		switch {
+		case serr != nil:
+			fmt.Fprintf(&diff, "--- %s\n+++ /dev/null\n@@\n- %s\n", rel, string(scenarioData))
+		case derr != nil:
+			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n@@\n+ %s\n", rel, string(scenarioData))
+		default:
+			if bytes.Equal(scenarioData, dstData) {
+				return nil
+			}
+			fmt.Fprintf(&diff, "--- %s\n+++ %s\n@@\n- %s\n+ %s\n", rel, rel, string(scenarioData), string(dstData))
+		}
+		return nil
+	})
+	filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dst, path)
+		if err != nil {
+			return err
+		}
+		if _, serr := os.ReadFile(filepath.Join(src, rel)); serr != nil {
+			data, derr := os.ReadFile(path)
+			if derr != nil {
+				return derr
+			}
+			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n@@\n+ %s\n", rel, string(data))
+		}
+		return nil
+	})
+	return diff.String(), nil
+}
+
 // Exec runs an arbitrary command inside a service of a session.
 //
 // It is the participant's debug path: `incidentsim exec --service app -- sh -c
@@ -743,7 +756,7 @@ func (o *Orchestrator) waitForHealth(ctx context.Context, session *Session, adap
 // per session and ephemeral, so the debug is as safe as the task itself: a
 // change written inside a container disappears on the next recreate, and only
 // Apply can change what a verification grades.
-func (o *Orchestrator) Exec(ctx context.Context, sessionID, service string, command []string, timeout time.Duration) (runtime.ExecResult, error) {
+func (o *Orchestrator) Exec(ctx context.Context, sessionID string, req runtime.ExecRequest) (runtime.ExecResult, error) {
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return runtime.ExecResult{}, err
@@ -752,13 +765,8 @@ func (o *Orchestrator) Exec(ctx context.Context, sessionID, service string, comm
 	if err != nil {
 		return runtime.ExecResult{}, err
 	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	req := runtime.ExecRequest{
-		Service: service,
-		Command: command,
-		Timeout: timeout,
+	if req.Timeout <= 0 {
+		req.Timeout = 30 * time.Second
 	}
 	result, err := adapter.Exec(ctx, session.ID, req)
 	if err == nil && result.ExitCode != 0 {
@@ -766,15 +774,15 @@ func (o *Orchestrator) Exec(ctx context.Context, sessionID, service string, comm
 	}
 	if err != nil {
 		session.journal.Record(EventExecFailed, "command could not be executed", map[string]any{
-			"service": service,
-			"command": command,
+			"service": req.Service,
+			"command": req.Command,
 			"error":   err.Error(),
 		})
 		return result, err
 	}
 	session.journal.Record(EventExecRun, "participant ran a command in the environment", map[string]any{
-		"service": service,
-		"command": command,
+		"service": req.Service,
+		"command": req.Command,
 	})
 	return result, nil
 }

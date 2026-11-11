@@ -1,9 +1,14 @@
 // Command incidentsim is the CLI of the IncidentSim core. It talks to the
 // local HTTP API of the core; `incidentsim serve` starts that API.
+//
+// Every subcommand parses its own flag.FlagSet, so a positional session/task
+// id is never confused with a flag value (the optionalArg bug). A session id
+// may be given positionally or with --session.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -41,39 +46,47 @@ func run(args []string) error {
 	case "serve":
 		return serve(args[1:])
 	case "show":
-		return client(args[1:]).Show(context.Background(), optionalArg(args[1:]))
+		return showCmd(args[1:])
 	case "start":
-		_, err := client(args[1:]).Start(context.Background(), requiredArg(args[1:], "task id"))
-		return err
-	case "exec":
-		return runExec(args[1:])
-	case "metrics":
-		return client(args[1:]).Metrics(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""))
-	case "env":
-		return client(args[1:]).Env(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""))
+		return startCmd(args[1:])
+	case "status":
+		return statusCmd(args[1:])
 	case "logs":
-		return client(args[1:]).Logs(context.Background(), requiredArg(args[1:], "session id"), flagValue(args[1:], "--service", ""), flagValue(args[1:], "--grep", ""), intValue(flagValue(args[1:], "--tail", "200"), 200))
-	case "hint":
-		level := intValue(flagValue(args[1:], "--level", "0"), 0)
-		return client(args[1:]).Hint(context.Background(), requiredArg(args[1:], "session id"), level)
+		return logsCmd(args[1:])
+	case "metrics":
+		return metricsCmd(args[1:])
+	case "env":
+		return envCmd(args[1:])
+	case "exec":
+		return execCmd(args[1:])
+	case "sql":
+		return sqlCmd(args[1:])
+	case "shell":
+		return shellCmd(args[1:])
+	case "edit":
+		return editCmd(args[1:])
+	case "diff":
+		return diffCmd(args[1:])
 	case "apply":
-		return apply(args[1:])
+		return applyCmd(args[1:])
 	case "verify":
-		return client(args[1:]).Verify(context.Background(), requiredArg(args[1:], "session id"))
+		return verifyCmd(args[1:])
+	case "hint":
+		return hintCmd(args[1:])
 	case "reset":
-		return client(args[1:]).Reset(context.Background(), requiredArg(args[1:], "session id"))
+		return resetCmd(args[1:])
+	case "reveal":
+		return revealCmd(args[1:])
 	case "postmortem":
-		return client(args[1:]).Postmortem(context.Background(), requiredArg(args[1:], "session id"), hasFlag(args[1:], "--md"))
-	case "selfcheck":
-		return selfcheck(args[1:])
+		return postmortemCmd(args[1:])
 	case "stop":
-		return client(args[1:]).Stop(context.Background(), requiredArg(args[1:], "session id"))
+		return stopCmd(args[1:])
 	case "sessions":
-		return client(args[1:]).Sessions(context.Background())
+		return client(nil).Sessions(context.Background())
 	case "validate":
-		return validate(args[1:])
-	case "demo":
-		return demo(args[1:])
+		return validateCmd(args[1:])
+	case "selfcheck":
+		return selfcheckCmd(args[1:])
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -90,23 +103,28 @@ func usage() {
 	fmt.Print(`incidentsim — тренажёр разбора инцидентов
 
 Использование:
-  incidentsim serve [--config incidentsim.yaml]     запустить ядро (HTTP API)
-  incidentsim show [task]                           список задач или одна задача
-  incidentsim start <task>                          поднять окружение и активировать сбой
-  incidentsim metrics <session> [--service app]     последние метрики сервиса
-  incidentsim env <session> [--service app]          окружение сервиса (диагностика)
-  incidentsim logs <session> [--service app] [-grep текст] [--tail N]
-  incidentsim exec <session> --service app -- sh -c 'cat /etc/app/app.conf'
-  incidentsim exec <session> --service db --sql "SELECT 1"
-  incidentsim hint <session> [--level N]            подсказка по задаче
-  incidentsim apply <session> --service app --set KEY=VALUE [--no-restart]
-  incidentsim verify <session>                      correctness + quality gate
-  incidentsim reset <session>                       восстановить baseline
-  incidentsim stop <session>                        погасить окружение
-  incidentsim sessions                              активные сессии
-  incidentsim validate [dir]                        проверить манифесты каталога
-  incidentsim demo [task]                           один сценарий от start до postmortem
-  incidentsim selfcheck <task>                      прогнать reference и дистракторы
+  incidentsim serve [--config incidentsim.yaml] [--addr host:port]   запустить ядро (HTTP API)
+  incidentsim show [task]                                          список задач или одна задача (только публичное)
+  incidentsim start <task>                                         поднять окружение и активировать сбой
+  incidentsim status <session>                                     состояние сессии
+  incidentsim logs <session> [--service app] [--grep текст] [--tail N]  логи сервиса
+  incidentsim metrics <session> [--service app]                    метрики сервиса
+  incidentsim env <session> [--service app]                        окружение сервиса (диагностика)
+  incidentsim exec <session> --service app -- sh -c 'cat ...'      команда в сервисе
+  incidentsim sql <session> --service db "SELECT 1"                SQL-запрос к БД
+  incidentsim shell <session> [--service app]                      интерактивный терминал
+  incidentsim edit <session> [файл]                                открыть $EDITOR на файле workspace
+  incidentsim diff <session>                                       правки относительно исходного workspace
+  incidentsim apply <session> [--service app] [--file P --content T] применить фикс из workspace
+  incidentsim verify <session>                                     correctness + quality gate
+  incidentsim hint <session> [--level N]                           подсказка по задаче
+  incidentsim reset <session>                                      восстановить baseline
+  incidentsim reveal <session>                                     ответ и разбор (после pass или give-up)
+  incidentsim postmortem <session> [--md]                          постмортем сессии
+  incidentsim stop <session>                                       погасить окружение
+  incidentsim sessions                                             активные сессии
+  incidentsim validate [dir]                                       проверить манифесты каталога
+  incidentsim selfcheck <task>                                     прогнать reference и дистракторы
   incidentsim version
 
 Переменные окружения:
@@ -127,16 +145,21 @@ func client(args []string) *cli.Client {
 }
 
 func serve(args []string) error {
-	configPath := flagValue(args, "--config", os.Getenv("INCIDENTSIM_CONFIG"))
-	config, err := core.LoadConfig(configPath)
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	configPath := fs.String("config", os.Getenv("INCIDENTSIM_CONFIG"), "путь к incidentsim.yaml")
+	addr := fs.String("addr", "", "адрес сервера (переопределяет конфиг)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	config, err := core.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	if addr := flagValue(args, "--addr", ""); addr != "" {
-		config.Listen = addr
+	if *addr != "" {
+		config.Listen = *addr
 	}
 
-	catalog, err := core.NewCatalog(config.Catalog)
+	catalog, err := core.NewCatalog(config.CatalogDir())
 	if err != nil {
 		return err
 	}
@@ -154,8 +177,6 @@ func serve(args []string) error {
 			BaselineDir:    filepath.Dir(config.Firecracker.BaselineSnapshot),
 			GuestAgentPort: config.Firecracker.GuestAgentPort,
 		})
-		// Compose stays registered: a manifest can still choose it, and the
-		// core can fall back to it when KVM is unavailable on this host.
 		adapters["compose"] = compose.New(config.StateDir())
 	}
 
@@ -169,16 +190,11 @@ func serve(args []string) error {
 		Image:      "golang:1.24-alpine",
 		BuildCache: "incidentsim-go-build-cache",
 	}
-	// Session audit is optional: a missing Teleport degrades to a stub and a
-	// broken one is a warning in the journal.
 	orchestrator.Audit = teleport.FromConfig(teleport.Config{
 		Enabled:  config.Teleport.Enabled,
 		Endpoint: config.Teleport.Endpoint,
 		Timeout:  30 * time.Second,
 	})
-	if err != nil {
-		return err
-	}
 
 	server := &http.Server{
 		Addr:              config.Listen,
@@ -209,32 +225,247 @@ func serve(args []string) error {
 	}
 }
 
-// apply parses the fix flags and pushes them into a session.
-//
-// A fix is either a configuration change (--set) or a statement (--sql): those
-// are the two write paths a participant has, and both go through the same
-// journal so the postmortem sees them the same way.
-func apply(args []string) error {
-	sessionID := requiredArg(args, "session id")
-	service := flagValue(args, "--service", "")
-	if statement := flagValue(args, "--sql", ""); statement != "" {
-		return client(args).ExecSQL(context.Background(), sessionID, service, statement)
+// sessionID resolves the session id: the --session flag value wins if set,
+// otherwise the first positional argument. The flag default "__unset__" is a
+// sentinel that is never a real session id.
+func sessionID(sessionFlag string, positional []string) (string, error) {
+	if sessionFlag != "" && sessionFlag != "__unset__" {
+		return sessionFlag, nil
 	}
-	if service == "" {
+	if len(positional) > 0 {
+		return positional[0], nil
+	}
+	return "", fmt.Errorf("session id is required (positional or --session)")
+}
+
+func showCmd(args []string) error {
+	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c := client(nil)
+	if fs.NArg() == 0 {
+		return c.Show(context.Background(), "")
+	}
+	return c.Show(context.Background(), fs.Arg(0))
+}
+
+func startCmd(args []string) error {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	task, err := taskIDArg(fs.Args())
+	if err != nil {
+		return err
+	}
+	sessionID, err := client(nil).Start(context.Background(), task)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("session %s started\n", sessionID)
+	return nil
+}
+
+func statusCmd(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	c := client(nil)
+	var view struct {
+		Session struct {
+			ID      string `json:"id"`
+			State   string `json:"state"`
+			TaskID  string `json:"task_id"`
+			Verdict string `json:"last_verdict"`
+			Engine  string `json:"engine"`
+		} `json:"session"`
+	}
+	if err := c.Get(context.Background(), "/api/v1/sessions/"+id, &view); err != nil {
+		return err
+	}
+	s := view.Session
+	fmt.Printf("session %s (%s, %s, engine %s)\n", s.ID, s.TaskID, s.State, s.Engine)
+	if s.Verdict != "" {
+		fmt.Printf("verdict: %s\n", s.Verdict)
+	}
+	return nil
+}
+
+func logsCmd(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	service := fs.String("service", "", "сервис")
+	grep := fs.String("grep", "", "фильтр строк")
+	tail := fs.Int("tail", 200, "количество строк")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Logs(context.Background(), id, *service, *grep, *tail)
+}
+
+func metricsCmd(args []string) error {
+	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
+	service := fs.String("service", "", "сервис")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Metrics(context.Background(), id, *service)
+}
+
+func envCmd(args []string) error {
+	fs := flag.NewFlagSet("env", flag.ExitOnError)
+	service := fs.String("service", "", "сервис")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Env(context.Background(), id, *service)
+}
+
+func execCmd(args []string) error {
+	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	service := fs.String("service", "", "сервис")
+	tty := fs.Bool("tty", false, "выделить терминал")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	c := client(nil)
+	statement := flagValue(args, "--sql", "")
+	if statement != "" {
+		return c.ExecSQL(context.Background(), id, *service, statement)
+	}
+	command := commandAfterSeparator(fs.Args())
+	if len(command) == 0 {
+		return fmt.Errorf("a command is required: incidentsim exec <session> --service app -- sh -c '...'")
+	}
+	if *service == "" {
+		return fmt.Errorf("--service is required")
+	}
+	if *tty {
+		return c.Shell(context.Background(), id, *service)
+	}
+	result, err := execClient(c, context.Background(), id, *service, command, "", 0)
+	if err != nil {
+		return err
+	}
+	return ReportExecResult(result)
+}
+
+func sqlCmd(args []string) error {
+	fs := flag.NewFlagSet("sql", flag.ExitOnError)
+	service := fs.String("service", "db", "сервис БД")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	statement := strings.Join(fs.Args(), " ")
+	if statement == "" {
+		return fmt.Errorf("a statement is required: incidentsim sql <session> --service db 'SELECT 1'")
+	}
+	return client(nil).ExecSQL(context.Background(), id, *service, statement)
+}
+
+func shellCmd(args []string) error {
+	fs := flag.NewFlagSet("shell", flag.ExitOnError)
+	service := fs.String("service", "app", "сервис")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Shell(context.Background(), id, *service)
+}
+
+func editCmd(args []string) error {
+	fs := flag.NewFlagSet("edit", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	var file string
+	if fs.NArg() > 1 {
+		file = fs.Arg(1)
+	}
+	return client(nil).Edit(context.Background(), id, file)
+}
+
+func diffCmd(args []string) error {
+	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Diff(context.Background(), id)
+}
+
+func applyCmd(args []string) error {
+	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+	service := fs.String("service", "", "сервис")
+	noRestart := fs.Bool("no-restart", false, "не перезапускать сервис после применения")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	c := client(nil)
+	if statement := flagValue(args, "--sql", ""); statement != "" {
+		return c.ExecSQL(context.Background(), id, *service, statement)
+	}
+	if *service == "" {
 		return fmt.Errorf("--service is required")
 	}
 	sets := multiFlag(args, "--set")
+	if len(sets) > 0 {
+		return fmt.Errorf("--set убран из пользовательского CLI: правите файл в workspace и запустите incidentsim apply <session>")
+	}
 	files := multiFileFlag(args, "--file")
 	contents := multiFlag(args, "--content")
 	fileFromRef := multiFlag(args, "--file-from-reference")
-	if len(fileFromRef) > 0 && os.Getenv("INCIDENTSIM_DEMO") != "1" {
-		return fmt.Errorf("--file-from-reference is only available with INCIDENTSIM_DEMO=1")
-	}
 	if len(files) != len(contents) {
 		return fmt.Errorf("each --file must have a matching --content")
-	}
-	if len(sets) == 0 && len(files) == 0 && len(fileFromRef) == 0 {
-		return fmt.Errorf("at least one --set KEY=VALUE, --file PATH --content TEXT, or --file-from-reference PATH is required")
 	}
 	fileMap := map[string]string{}
 	for i, f := range files {
@@ -245,7 +476,7 @@ func apply(args []string) error {
 		return err
 	}
 	for _, refPath := range fileFromRef {
-		referenceDir, err := taskReferenceDir(projectRoot, client(args), sessionID)
+		referenceDir, err := taskReferenceDir(projectRoot, c, id)
 		if err != nil {
 			return err
 		}
@@ -255,119 +486,100 @@ func apply(args []string) error {
 		}
 		fileMap[refPath] = content
 	}
-	patch, err := core.ParseEnvPatch(service, sets, !hasFlag(args, "--no-restart"))
+	patch, err := core.ParseEnvPatch(*service, sets, !*noRestart)
 	if err != nil {
 		return err
 	}
 	patch.Files = fileMap
-	return client(args).Apply(context.Background(), sessionID, service, patch.Vars, patch.Files, patch.Restart)
+	return c.Apply(context.Background(), id, *service, nil, patch.Files, patch.Restart)
 }
 
-// taskReferenceDir resolves the reference directory of a session's task.
-//
-// The reference path is read from the manifest (spec.reference) through the
-// core API, so there is exactly one declaration of where a task's answer key
-// lives. The manifest path is repository-relative, and the CLI runs from the
-// repository root, so it is joined with the current directory.
-//
-// The session id encodes the task id as <task>-<seq>-<HHMMSS>, which is the
-// only way a CLI invocation knows which task it is talking about.
-func taskReferenceDir(projectRoot string, api *cli.Client, sessionID string) (string, error) {
-	taskID, err := taskIDFromSession(sessionID)
+func verifyCmd(args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
 	if err != nil {
-		return "", err
+		return err
 	}
-	var task struct {
-		Reference string `json:"reference,omitempty"`
-		Workspace string `json:"workspace,omitempty"`
-	}
-	if err := api.Get(context.Background(), "/api/v1/tasks/"+taskID, &task); err != nil {
-		return "", fmt.Errorf("read task %q: %w", taskID, err)
-	}
-	if task.Reference != "" {
-		return filepath.Join(projectRoot, task.Reference), nil
-	}
-	return filepath.Join(projectRoot, "scenarios", taskID, "reference"), nil
+	return client(nil).Verify(context.Background(), id)
 }
 
-// taskIDFromSession recovers the task id from a session id, which the core
-// builds as <taskID>-<sequence>-<HHMMSS>. A task id is itself kebab-case, so
-// only the last two dash-separated segments belong to the core.
-func taskIDFromSession(sessionID string) (string, error) {
-	parts := strings.Split(sessionID, "-")
-	if len(parts) < 3 {
-		return "", fmt.Errorf("cannot determine task id from session %q", sessionID)
+func hintCmd(args []string) error {
+	fs := flag.NewFlagSet("hint", flag.ExitOnError)
+	level := fs.Int("level", 0, "уровень подсказки")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	return strings.Join(parts[:len(parts)-2], "-"), nil
-}
-
-// runExec runs a command inside a service of a session.
-//
-// Two forms, one endpoint:
-//
-//	incidentsim exec <session> --service app -- sh -c 'cat /etc/app/app.conf'
-//	incidentsim exec <session> --service db --sql "SELECT 1"
-//
-// The first is the shell into the environment a participant needs to debug an
-// incident: cat, ps, ss, top, curl, a manual psql session, tcpdump. The second
-// is sugar the core expands with the task's own database client.
-func runExec(args []string) error {
-	sessionID := requiredArg(args, "session id")
-	service := flagValue(args, "--service", "")
-	if statement := flagValue(args, "--sql", ""); statement != "" {
-		return client(args).ExecSQL(context.Background(), sessionID, service, statement)
-	}
-	command := commandAfterSeparator(args)
-	if len(command) == 0 {
-		return fmt.Errorf("a command is required: incidentsim exec <session> --service app -- sh -c '...'")
-	}
-	if service == "" {
-		return fmt.Errorf("--service is required")
-	}
-	return client(args).Exec(context.Background(), sessionID, service, command)
-}
-
-// commandAfterSeparator returns everything after a bare `--`, which is how a
-// shell command is spelled on the command line without the flags eating it.
-func commandAfterSeparator(args []string) []string {
-	for i, arg := range args {
-		if arg == "--" {
-			return args[i+1:]
-		}
-	}
-	return nil
-}
-
-// readReferenceFile reads a file from the reference directory of a task.
-func readReferenceFile(referenceDir, refPath string) (string, error) {
-	// Reject absolute paths and ..-segments before joining:
-	// a participant must not be able to read outside the reference directory.
-	if filepath.IsAbs(refPath) {
-		return "", fmt.Errorf("reference path %q must be relative", refPath)
-	}
-	for _, part := range strings.Split(refPath, string(filepath.Separator)) {
-		if part == ".." {
-			return "", fmt.Errorf("reference path %q escapes the reference directory", refPath)
-		}
-	}
-
-	path := filepath.Join(referenceDir, refPath)
-	rel, err := filepath.Rel(referenceDir, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("reference path %q escapes the reference directory", refPath)
-	}
-	data, err := os.ReadFile(path)
+	id, err := sessionID(*sessionFlag, fs.Args())
 	if err != nil {
-		return "", fmt.Errorf("read reference file %s: %w", path, err)
+		return err
 	}
-	return string(data), nil
+	return client(nil).Hint(context.Background(), id, *level)
 }
 
-// validate checks a catalog directory without starting the core.
-func validate(args []string) error {
-	dir := optionalArg(args)
-	if dir == "" {
-		dir = "manifests"
+func resetCmd(args []string) error {
+	fs := flag.NewFlagSet("reset", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Reset(context.Background(), id)
+}
+
+func revealCmd(args []string) error {
+	fs := flag.NewFlagSet("reveal", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	// reveal is gated to post-pass/give-up by the core (B4); for now it is an
+	// alias to postmortem.
+	return postmortemCmd(append([]string{"--md", "--session", id}, fs.Args()...))
+}
+
+func postmortemCmd(args []string) error {
+	fs := flag.NewFlagSet("postmortem", flag.ExitOnError)
+	markdown := fs.Bool("md", false, "вывод в формате markdown")
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Postmortem(context.Background(), id, *markdown)
+}
+
+func stopCmd(args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).Stop(context.Background(), id)
+}
+
+func validateCmd(args []string) error {
+	dir := "manifests"
+	if len(args) > 0 {
+		dir = args[0]
 	}
 	catalog, err := core.NewCatalog(dir)
 	if err != nil {
@@ -379,360 +591,41 @@ func validate(args []string) error {
 	return nil
 }
 
-// demo runs one task end to end and prints the verification report. It is the
-// fastest way to see the simulator work, and the script the README refers to.
-func demo(args []string) error {
-	taskID := optionalArg(args)
-	if taskID == "" {
-		taskID = "db-connection-leak"
-	}
-	api := client(args)
-
-	var tasks struct {
-		Tasks []struct {
-			ID string `json:"id"`
-		} `json:"tasks"`
-	}
-	if err := api.Show(context.Background(), ""); err != nil {
+func selfcheckCmd(args []string) error {
+	fs := flag.NewFlagSet("selfcheck", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := api.Get(context.Background(), "/api/v1/tasks", &tasks); err != nil {
-		return err
-	}
-	known := map[string]bool{}
-	for _, task := range tasks.Tasks {
-		known[task.ID] = true
-	}
-	if !known[taskID] {
-		return fmt.Errorf("task %q is not in the catalog", taskID)
-	}
-
-	fmt.Printf("\n=== start %s ===\n", taskID)
-	sessionID, err := api.Start(context.Background(), taskID)
+	task, err := taskIDArg(fs.Args())
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("\n=== hint ===\n")
-	if err := api.Hint(context.Background(), sessionID, 0); err != nil {
-		return err
-	}
-
-	fmt.Printf("\n=== verify before any fix ===\n")
-	if err := api.Verify(context.Background(), sessionID); err != nil {
-		fmt.Println("ожидаемо: окружение сломано, проверка не проходит")
-	}
-
-	fmt.Printf("\n=== metrics ===\n")
-	if err := api.Metrics(context.Background(), sessionID, ""); err != nil {
-		fmt.Println("метрики недоступны:", err)
-	}
-
-	if err := api.Reset(context.Background(), sessionID); err != nil {
-		fmt.Println("reset:", err)
-	}
-	if err := api.Stop(context.Background(), sessionID); err != nil {
-		fmt.Println("stop:", err)
-	}
-	return nil
+	return selfcheck(context.Background(), client(nil), task)
 }
 
-// selfcheck runs a task end to end: start, apply the reference fix,
-// verify (expect pass), reset, then apply each distractor and verify
-// (expect partial_fix). It exits 0 only when every step passes.
-func selfcheck(args []string) error {
-	taskID := requiredArg(args, "task id")
-	api := client(args)
+// --- helpers ---
 
-	// 1. Task must exist in the catalog.
-	var tasks struct {
-		Tasks []struct {
-			ID string `json:"id"`
-		} `json:"tasks"`
+// execClient posts either a command or a statement and returns the raw outcome.
+func execClient(c *cli.Client, ctx context.Context, sessionID, service string, command []string, statement string, timeoutMS int) (cli.ExecResult, error) {
+	body := map[string]any{"service": service}
+	if len(command) > 0 {
+		body["command"] = command
 	}
-	if err := api.Get(context.Background(), "/api/v1/tasks", &tasks); err != nil {
-		return err
+	if statement != "" {
+		body["statement"] = statement
 	}
-	known := map[string]bool{}
-	for _, t := range tasks.Tasks {
-		known[t.ID] = true
+	if timeoutMS > 0 {
+		body["timeout_ms"] = timeoutMS
 	}
-	if !known[taskID] {
-		return fmt.Errorf("task %q is not in the catalog", taskID)
+	var response struct {
+		ExitCode int    `json:"exit_code"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
 	}
-
-	// 2. The task detail carries everything the run needs: the level, the
-	// editable files, the reference directory the manifest declares and the
-	// distractors. Reading them from one place keeps the CLI from keeping a
-	// second, drifting copy of the task definition.
-	task, err := readTaskDetail(api, taskID)
-	if err != nil {
-		return err
+	if err := c.Post(ctx, "/api/v1/sessions/"+sessionID+"/exec", body, &response); err != nil {
+		return cli.ExecResult{}, err
 	}
-	fmt.Printf("=== selfcheck %s (level=%s) ===\n", taskID, task.Level)
-
-	// A run without distractors cannot prove that a false fix is caught.
-	if len(task.Distractors) == 0 {
-		return fmt.Errorf("task %q declares no distractors in the API response: selfcheck cannot prove a false fix is caught", taskID)
-	}
-
-	// 3. Start the task.
-	sessionID, err := api.Start(context.Background(), taskID)
-	if err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-	defer func() {
-		_ = api.Stop(context.Background(), sessionID)
-	}()
-	fmt.Printf("start: PASS (session=%s)\n", sessionID)
-
-	// 4. Apply the reference fix based on level.
-	projectRoot, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	if err := applyReferenceFix(api, sessionID, task, referenceDirFor(projectRoot, task)); err != nil {
-		return fmt.Errorf("apply reference fix: %w", err)
-	}
-	fmt.Printf("apply reference: PASS\n")
-
-	// 5. Verify after reference fix: must pass.
-	if err := verifyExpect(api, sessionID, verifier.VerdictPass); err != nil {
-		return fmt.Errorf("verify after reference: %w", err)
-	}
-	fmt.Printf("verify reference: PASS\n")
-
-	// 6. Reset back to the broken state.
-	if err := api.Reset(context.Background(), sessionID); err != nil {
-		return fmt.Errorf("reset: %w", err)
-	}
-	fmt.Printf("reset: PASS\n")
-
-	// 7. For each distractor: apply, verify (expect partial_fix), reset.
-	for _, d := range task.Distractors {
-		fmt.Printf("  distractor %s: %s\n", d.ID, d.Title)
-		if err := applyDistractor(api, context.Background(), sessionID, d, task.Level); err != nil {
-			return fmt.Errorf("apply distractor %s: %w", d.ID, err)
-		}
-		if err := verifyExpect(api, sessionID, verifier.VerdictPartial); err != nil {
-			return fmt.Errorf("verify distractor %s: %w", d.ID, err)
-		}
-		if err := api.Reset(context.Background(), sessionID); err != nil {
-			return fmt.Errorf("reset after distractor %s: %w", d.ID, err)
-		}
-		fmt.Printf("  distractor %s: PASS (partial_fix)\n", d.ID)
-	}
-
-	fmt.Printf("=== selfcheck %s: ALL PASS ===\n", taskID)
-	return nil
-}
-
-// taskDetail is the catalog view of one task the selfcheck needs.
-type taskDetail struct {
-	ID          string   `json:"id"`
-	Level       string   `json:"level"`
-	Editable    []string `json:"editable,omitempty"`
-	Reference   string   `json:"reference,omitempty"`
-	Distractors []struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-		Fails string `json:"fails"`
-	} `json:"distractors,omitempty"`
-}
-
-// referenceDirFor resolves the reference directory of a task from the
-// manifest declaration (spec.reference), falling back to
-// scenarios/<task>/reference for a manifest that does not declare one.
-func referenceDirFor(projectRoot string, task taskDetail) string {
-	if task.Reference != "" {
-		return filepath.Join(projectRoot, task.Reference)
-	}
-	return filepath.Join(projectRoot, "scenarios", task.ID, "reference")
-}
-
-// readTaskDetail reads the catalog detail of a task.
-func readTaskDetail(api *cli.Client, taskID string) (taskDetail, error) {
-	var task taskDetail
-	if err := api.Get(context.Background(), "/api/v1/tasks/"+taskID, &task); err != nil {
-		return task, fmt.Errorf("read task %q: %w", taskID, err)
-	}
-	if task.Level == "" {
-		return task, fmt.Errorf("task %q declares no level", taskID)
-	}
-	return task, nil
-}
-
-// splitSQLStatements splits a reference .sql file into individual statements.
-// Comments and empty lines are dropped; a trailing semicolon is trimmed.
-func splitSQLStatements(content string) []string {
-	var out []string
-	for _, chunk := range strings.Split(content, ";") {
-		var lines []string
-		for _, line := range strings.Split(chunk, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
-			}
-			lines = append(lines, line)
-		}
-		stmt := strings.TrimSpace(strings.Join(lines, "\n"))
-		if stmt != "" {
-			out = append(out, stmt)
-		}
-	}
-	return out
-}
-
-// applyReferenceFix applies the reference solution based on task level.
-func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, referenceDir string) error {
-	service := "app"
-	switch task.Level {
-	case "code":
-		// For code-level tasks, apply the reference source file.
-		if len(task.Editable) == 0 {
-			return fmt.Errorf("code-level task %q has no editable files", task.ID)
-		}
-		refPath := task.Editable[0]
-		content, err := readReferenceFile(referenceDir, refPath)
-		if err != nil {
-			return fmt.Errorf("read reference %s: %w", refPath, err)
-		}
-		return api.Apply(context.Background(), sessionID, service, nil,
-			map[string]string{refPath: content}, true)
-	case "config":
-		// For config-level tasks, apply the reference config file.
-		if len(task.Editable) == 0 {
-			return fmt.Errorf("config-level task %q has no editable files", task.ID)
-		}
-		refPath := task.Editable[0]
-		content, err := readReferenceFile(referenceDir, refPath)
-		if err != nil {
-			return fmt.Errorf("read reference %s: %w", refPath, err)
-		}
-		return api.Apply(context.Background(), sessionID, service, nil,
-			map[string]string{refPath: content}, true)
-	case "db":
-		// For db-level tasks, apply each statement in reference solution.sql.
-		content, err := readReferenceFile(referenceDir, "solution.sql")
-		if err != nil {
-			return fmt.Errorf("read reference solution.sql: %w", err)
-		}
-		for _, stmt := range splitSQLStatements(content) {
-			if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
-				return fmt.Errorf("apply reference statement %q: %w", stmt, err)
-			}
-		}
-		return nil
-	case "composite":
-		// For composite tasks, apply all reference config files.
-		if len(task.Editable) == 0 {
-			return fmt.Errorf("composite-level task %q has no editable files", task.ID)
-		}
-		for _, refPath := range task.Editable {
-			content, err := readReferenceFile(referenceDir, refPath)
-			if err != nil {
-				return fmt.Errorf("read reference %s: %w", refPath, err)
-			}
-			if err := api.Apply(context.Background(), sessionID, service, nil,
-				map[string]string{refPath: content}, true); err != nil {
-				return err
-			}
-		}
-		// A composite fix is config + SQL: run solution.sql if present.
-		if content, err := readReferenceFile(referenceDir, "solution.sql"); err == nil {
-			for _, stmt := range splitSQLStatements(content) {
-				if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
-					return fmt.Errorf("apply reference statement %q: %w", stmt, err)
-				}
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown level %q", task.Level)
-	}
-}
-
-// verifyExpect calls verify and checks that the verdict matches want.
-func verifyExpect(api *cli.Client, sessionID, want string) error {
-	var report verifier.Report
-	if err := api.Post(context.Background(), "/api/v1/sessions/"+sessionID+"/verify", nil, &report); err != nil {
-		return fmt.Errorf("verify request: %w", err)
-	}
-	if report.Verdict != want {
-		return fmt.Errorf("verdict = %s, want %s\n%s", report.Verdict, want, report.String())
-	}
-	return nil
-}
-
-// applyDistractor applies a distractor fix based on its fails check.
-//
-// The switch is the mapping from "what this distractor hides" to "the action
-// that hides it". Every distractor of the catalog must have its own branch
-// with its own fails check: two distractors sharing a fails value are a task
-// bug, because they would apply the same action and grade the same way.
-func applyDistractor(api *cli.Client, ctx context.Context, sessionID string, d struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Fails string `json:"fails"`
-}, level string) error {
-	service := "app"
-	switch d.Fails {
-	case "pool-in-use-not-maxed":
-		// bigger-pool: set POOL_MAX higher
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{"POOL_MAX": "100"}, nil, true)
-	case "idle-in-transaction-bounded":
-		// restart-service: restart the service. The connections are freed,
-		// so the system answers again, but the leaking code is still there
-		// and the leak re-forms under the replayed load.
-		return api.Apply(ctx, sessionID, service,
-			map[string]string{}, nil, true)
-	case "retry-loop-bounded":
-		// disable-retry: set RETRY_ENABLED=false
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{"RETRY_ENABLED": "false"}, nil, true)
-	case "cache-back-on":
-		// restart-app: just restart (env already broken from start)
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{}, nil, true)
-	case "log-history-preserved":
-		// delete-log-file: LOG_FILE=/dev/null makes the preserved-log check fail
-		// (empty file) while freeing the disk; behaviourally a deleted log.
-		return api.Apply(ctx, sessionID, "app", nil,
-			map[string]string{"config/app.conf": "LOG_LEVEL=debug\nLOG_FILE=/dev/null\n"}, true)
-	case "data-preserved":
-		// truncate-orders: fast queries, no data.
-		return api.ExecSQL(ctx, sessionID, "db", "TRUNCATE orders")
-	case "autovacuum-enabled":
-		// Keep autovacuum off; the symptom is not what the check catches.
-		return api.ExecSQL(ctx, sessionID, "db", "ALTER TABLE orders SET (autovacuum_enabled = false)")
-	case "connection-limit-restored":
-		// Squeeze the connection limit instead of fixing the cache/retry loop.
-		return api.ExecSQL(ctx, sessionID, "db", "ALTER ROLE postgres CONNECTION LIMIT 10")
-	default:
-		return fmt.Errorf("unknown distractor fails check %q", d.Fails)
-	}
-}
-
-// --- flag helpers -----------------------------------------------------------
-
-func optionalArg(args []string) string {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		return arg
-	}
-	return ""
-}
-
-func requiredArg(args []string, what string) string {
-	if value := optionalArg(args); value != "" {
-		return value
-	}
-	fmt.Fprintf(os.Stderr, "incidentsim: %s is required\n", what)
-	os.Exit(2)
-	return ""
+	return cli.ExecResult{ExitCode: response.ExitCode, Stdout: response.Stdout, Stderr: response.Stderr}, nil
 }
 
 func flagValue(args []string, name, fallback string) string {
@@ -788,4 +681,324 @@ func intValue(text string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func commandAfterSeparator(args []string) []string {
+	for i, arg := range args {
+		if arg == "--" {
+			return args[i+1:]
+		}
+	}
+	return nil
+}
+
+// taskReferenceDir resolves the reference directory of a session's task.
+func taskReferenceDir(projectRoot string, api *cli.Client, sessionID string) (string, error) {
+	taskID, err := taskIDFromSession(sessionID)
+	if err != nil {
+		return "", err
+	}
+	var task struct {
+		Reference string `json:"reference,omitempty"`
+		Workspace string `json:"workspace,omitempty"`
+	}
+	if err := api.Get(context.Background(), "/api/v1/tasks/"+taskID, &task); err != nil {
+		return "", fmt.Errorf("read task %q: %w", taskID, err)
+	}
+	if task.Reference != "" {
+		return filepath.Join(projectRoot, task.Reference), nil
+	}
+	return filepath.Join(projectRoot, "scenarios", taskID, "reference"), nil
+}
+
+// taskIDArg returns the single positional task id argument.
+func taskIDArg(positional []string) (string, error) {
+	if len(positional) == 0 {
+		return "", fmt.Errorf("task id is required")
+	}
+	return positional[0], nil
+}
+
+// taskIDFromSession recovers the task id from a session id, which the core
+// builds as <taskID>-<sequence>-<HHMMSS>.
+func taskIDFromSession(sessionID string) (string, error) {
+	parts := strings.Split(sessionID, "-")
+	if len(parts) < 3 {
+		return "", fmt.Errorf("cannot determine task id from session %q", sessionID)
+	}
+	return strings.Join(parts[:len(parts)-2], "-"), nil
+}
+
+// readReferenceFile reads a file from the reference directory of a task.
+func readReferenceFile(referenceDir, refPath string) (string, error) {
+	if filepath.IsAbs(refPath) {
+		return "", fmt.Errorf("reference path %q must be relative", refPath)
+	}
+	for _, part := range strings.Split(refPath, string(filepath.Separator)) {
+		if part == ".." {
+			return "", fmt.Errorf("reference path %q escapes the reference directory", refPath)
+		}
+	}
+	path := filepath.Join(referenceDir, refPath)
+	rel, err := filepath.Rel(referenceDir, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("reference path %q escapes the reference directory", refPath)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read reference file %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// splitSQLStatements splits a reference .sql file into individual statements.
+func splitSQLStatements(content string) []string {
+	var out []string
+	for _, chunk := range strings.Split(content, ";") {
+		var lines []string
+		for _, line := range strings.Split(chunk, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+				continue
+			}
+			lines = append(lines, line)
+		}
+		stmt := strings.TrimSpace(strings.Join(lines, "\n"))
+		if stmt != "" {
+			out = append(out, stmt)
+		}
+	}
+	return out
+}
+
+// taskDetail is the catalog view of one task the selfcheck needs.
+type taskDetail struct {
+	ID          string   `json:"id"`
+	Level       string   `json:"level"`
+	Editable    []string `json:"editable,omitempty"`
+	Reference   string   `json:"reference,omitempty"`
+	Distractors []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Fails string `json:"fails"`
+	} `json:"distractors,omitempty"`
+}
+
+// referenceDirFor resolves the reference directory of a task from the
+// manifest declaration (spec.reference), falling back to
+// scenarios/<task>/reference.
+func referenceDirFor(projectRoot string, task taskDetail) string {
+	if task.Reference != "" {
+		return filepath.Join(projectRoot, task.Reference)
+	}
+	return filepath.Join(projectRoot, "scenarios", task.ID, "reference")
+}
+
+// readTaskDetail reads the catalog detail of a task.
+func readTaskDetail(api *cli.Client, taskID string) (taskDetail, error) {
+	var task taskDetail
+	if err := api.Get(context.Background(), "/api/v1/tasks/"+taskID, &task); err != nil {
+		return task, fmt.Errorf("read task %q: %w", taskID, err)
+	}
+	if task.Level == "" {
+		return task, fmt.Errorf("task %q declares no level", task.ID)
+	}
+	return task, nil
+}
+
+// selfcheck runs a task end to end: start, apply the reference fix,
+// verify (expect pass), reset, then apply each distractor and verify
+// (expect partial_fix). It exits 0 only when every step passes.
+func selfcheck(ctx context.Context, api *cli.Client, taskID string) error {
+	var tasks struct {
+		Tasks []struct {
+			ID string `json:"id"`
+		} `json:"tasks"`
+	}
+	if err := api.Get(ctx, "/api/v1/tasks", &tasks); err != nil {
+		return err
+	}
+	known := map[string]bool{}
+	for _, t := range tasks.Tasks {
+		known[t.ID] = true
+	}
+	if !known[taskID] {
+		return fmt.Errorf("task %q is not in the catalog", taskID)
+	}
+
+	task, err := readTaskDetail(api, taskID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("=== selfcheck %s (level=%s) ===\n", taskID, task.Level)
+
+	if len(task.Distractors) == 0 {
+		return fmt.Errorf("task %q declares no distractors: selfcheck cannot prove a false fix is caught", taskID)
+	}
+
+	sessionID, err := api.Start(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	defer func() {
+		_ = api.Stop(ctx, sessionID)
+	}()
+	fmt.Printf("start: PASS (session=%s)\n", sessionID)
+
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := applyReferenceFix(api, sessionID, task, referenceDirFor(projectRoot, task)); err != nil {
+		return fmt.Errorf("apply reference fix: %w", err)
+	}
+	fmt.Printf("apply reference: PASS\n")
+
+	if err := verifyExpect(api, sessionID, verifier.VerdictPass); err != nil {
+		return fmt.Errorf("verify after reference: %w", err)
+	}
+	fmt.Printf("verify reference: PASS\n")
+
+	if err := api.Reset(ctx, sessionID); err != nil {
+		return fmt.Errorf("reset: %w", err)
+	}
+	fmt.Printf("reset: PASS\n")
+
+	for _, d := range task.Distractors {
+		fmt.Printf("  distractor %s: %s\n", d.ID, d.Title)
+		if err := applyDistractor(api, ctx, sessionID, d, task.Level); err != nil {
+			return fmt.Errorf("apply distractor %s: %w", d.ID, err)
+		}
+		if err := verifyExpect(api, sessionID, verifier.VerdictPartial); err != nil {
+			return fmt.Errorf("verify distractor %s: %w", d.ID, err)
+		}
+		if err := api.Reset(ctx, sessionID); err != nil {
+			return fmt.Errorf("reset after distractor %s: %w", d.ID, err)
+		}
+		fmt.Printf("  distractor %s: PASS (partial_fix)\n", d.ID)
+	}
+
+	fmt.Printf("=== selfcheck %s: ALL PASS ===\n", taskID)
+	return nil
+}
+
+// applyReferenceFix applies the reference solution based on task level.
+func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, referenceDir string) error {
+	service := "app"
+	switch task.Level {
+	case "code":
+		if len(task.Editable) == 0 {
+			return fmt.Errorf("code-level task %q has no editable files", task.ID)
+		}
+		refPath := task.Editable[0]
+		content, err := readReferenceFile(referenceDir, refPath)
+		if err != nil {
+			return fmt.Errorf("read reference %s: %w", refPath, err)
+		}
+		return api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true)
+	case "config":
+		if len(task.Editable) == 0 {
+			return fmt.Errorf("config-level task %q has no editable files", task.ID)
+		}
+		refPath := task.Editable[0]
+		content, err := readReferenceFile(referenceDir, refPath)
+		if err != nil {
+			return fmt.Errorf("read reference %s: %w", refPath, err)
+		}
+		return api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true)
+	case "db":
+		content, err := readReferenceFile(referenceDir, "solution.sql")
+		if err != nil {
+			return fmt.Errorf("read reference solution.sql: %w", err)
+		}
+		for _, stmt := range splitSQLStatements(content) {
+			if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
+				return fmt.Errorf("apply reference statement %q: %w", stmt, err)
+			}
+		}
+		return nil
+	case "composite":
+		if len(task.Editable) == 0 {
+			return fmt.Errorf("composite-level task %q has no editable files", task.ID)
+		}
+		for _, refPath := range task.Editable {
+			content, err := readReferenceFile(referenceDir, refPath)
+			if err != nil {
+				return fmt.Errorf("read reference %s: %w", refPath, err)
+			}
+			if err := api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true); err != nil {
+				return err
+			}
+		}
+		if content, err := readReferenceFile(referenceDir, "solution.sql"); err == nil {
+			for _, stmt := range splitSQLStatements(content) {
+				if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
+					return fmt.Errorf("apply reference statement %q: %w", stmt, err)
+				}
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown level %q", task.Level)
+	}
+}
+
+func verifyExpect(api *cli.Client, sessionID, want string) error {
+	var report verifier.Report
+	if err := api.Post(context.Background(), "/api/v1/sessions/"+sessionID+"/verify", nil, &report); err != nil {
+		return fmt.Errorf("verify request: %w", err)
+	}
+	if report.Verdict != want {
+		return fmt.Errorf("verdict = %s, want %s\n%s", report.Verdict, want, report.String())
+	}
+	return nil
+}
+
+// applyDistractor applies a distractor fix based on its fails check.
+func applyDistractor(api *cli.Client, ctx context.Context, sessionID string, d struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Fails string `json:"fails"`
+}, level string) error {
+	service := "app"
+	switch d.Fails {
+	case "pool-in-use-not-maxed":
+		return api.Apply(context.Background(), sessionID, service,
+			map[string]string{"POOL_MAX": "100"}, nil, true)
+	case "idle-in-transaction-bounded":
+		return api.Apply(ctx, sessionID, service,
+			map[string]string{}, nil, true)
+	case "retry-loop-bounded":
+		return api.Apply(context.Background(), sessionID, service,
+			map[string]string{"RETRY_ENABLED": "false"}, nil, true)
+	case "cache-back-on":
+		return api.Apply(context.Background(), sessionID, service,
+			map[string]string{}, nil, true)
+	case "log-history-preserved":
+		return api.Apply(ctx, sessionID, "app", nil,
+			map[string]string{"config/app.conf": "LOG_LEVEL=debug\nLOG_FILE=/dev/null\n"}, true)
+	case "data-preserved":
+		return api.ExecSQL(ctx, sessionID, "db", "TRUNCATE orders")
+	case "autovacuum-enabled":
+		return api.ExecSQL(ctx, sessionID, "db", "ALTER TABLE orders SET (autovacuum_enabled = false)")
+	case "connection-limit-restored":
+		return api.ExecSQL(ctx, sessionID, "db", "ALTER ROLE postgres CONNECTION LIMIT 10")
+	default:
+		return fmt.Errorf("unknown distractor fails check %q", d.Fails)
+	}
+}
+
+// ReportExecResult prints what the command produced and turns a non-zero exit
+// into an error.
+func ReportExecResult(result cli.ExecResult) error {
+	if result.Stdout != "" {
+		fmt.Println(strings.TrimSpace(result.Stdout))
+	}
+	if result.Stderr != "" {
+		fmt.Fprintln(os.Stderr, strings.TrimSpace(result.Stderr))
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("command exited %d", result.ExitCode)
+	}
+	return nil
 }

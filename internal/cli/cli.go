@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -462,7 +464,83 @@ func (c *Client) Reset(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// Stop tears a session down.
+// Diff prints the unified diff of the session workspace against the scenario.
+func (c *Client) Diff(ctx context.Context, sessionID string) error {
+	var response struct {
+		Diff string `json:"diff"`
+	}
+	if err := c.Get(ctx, "/api/v1/sessions/"+sessionID+"/diff", &response); err != nil {
+		return err
+	}
+	if response.Diff == "" {
+		fmt.Fprintln(c.Out, "no changes")
+		return nil
+	}
+	fmt.Fprint(c.Out, response.Diff)
+	return nil
+}
+
+// Edit opens $EDITOR on a file of the session workspace. Without a file it
+// prints the workspace path so the participant can open it in their editor.
+func (c *Client) Edit(ctx context.Context, sessionID, file string) error {
+	var session struct {
+		Session struct {
+			WorkspaceDir string `json:"workspace_dir,omitempty"`
+		} `json:"session"`
+	}
+	if err := c.Get(ctx, "/api/v1/sessions/"+sessionID, &session); err != nil {
+		return err
+	}
+	dir := session.Session.WorkspaceDir
+	if dir == "" {
+		return fmt.Errorf("session %s has no workspace", sessionID)
+	}
+	target := dir
+	if file != "" {
+		target = filepath.Join(dir, file)
+		if _, err := os.Stat(target); err != nil {
+			return fmt.Errorf("file %q not found in workspace: %w", file, err)
+		}
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	cmd := exec.Command(editor, target)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("editor %q: %w", editor, err)
+	}
+	fmt.Fprintf(c.Out, "workspace: %s\n", dir)
+	return nil
+}
+
+// Shell opens an interactive terminal in a service of the session.
+func (c *Client) Shell(ctx context.Context, sessionID, service string) error {
+	command := []string{"sh"}
+	result, err := c.execTTY(ctx, sessionID, service, command)
+	if err != nil {
+		return err
+	}
+	return reportExecResult(c, result)
+}
+
+// execTTY runs a command inside a service with a terminal allocated, for an
+// interactive shell. It reuses the same request path as exec.
+func (c *Client) execTTY(ctx context.Context, sessionID, service string, command []string) (ExecResult, error) {
+	body := map[string]any{"service": service, "command": command, "tty": true}
+	var response struct {
+		ExitCode int    `json:"exit_code"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/exec", body, &response); err != nil {
+		return ExecResult{}, err
+	}
+	return ExecResult{ExitCode: response.ExitCode, Stdout: response.Stdout, Stderr: response.Stderr}, nil
+}
 func (c *Client) Stop(ctx context.Context, sessionID string) error {
 	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/stop", nil, nil); err != nil {
 		return err

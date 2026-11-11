@@ -147,7 +147,7 @@ func TestSelfcheckRejectsUnknownTask(t *testing.T) {
 
 	setenv("INCIDENTSIM_ADDR", server.URL)
 
-	err := selfcheck([]string{"nonexistent"})
+	err := selfcheck(context.Background(), cli.New(server.URL), "nonexistent")
 	if err == nil || !strings.Contains(err.Error(), "not in the catalog") {
 		t.Fatalf("selfcheck error = %v, want 'not in the catalog'", err)
 	}
@@ -174,7 +174,7 @@ func TestSelfcheckUsesCatalogEntry(t *testing.T) {
 
 	setenv("INCIDENTSIM_ADDR", server.URL)
 
-	err := selfcheck([]string{"fixture"})
+	err := selfcheck(context.Background(), cli.New(server.URL), "fixture")
 	if err == nil || !strings.Contains(err.Error(), "start") {
 		t.Fatalf("selfcheck error = %v, want start failure", err)
 	}
@@ -209,7 +209,7 @@ func TestSelfcheckFailsWhenTaskHasNoDistractors(t *testing.T) {
 
 	setenv("INCIDENTSIM_ADDR", server.URL)
 
-	err := selfcheck([]string{"fixture"})
+	err := selfcheck(context.Background(), cli.New(server.URL), "fixture")
 	if err == nil || !strings.Contains(err.Error(), "no distractors") {
 		t.Fatalf("selfcheck error = %v, want 'no distractors'", err)
 	}
