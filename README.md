@@ -1,6 +1,6 @@
 # IncidentSim
 
-IncidentSim — тренажёр разбора инцидентов на Go и Docker Compose. Участник
+IncidentSim — тренажёр разбора инцидентов на Go. Участник
 получает работающий, но неисправный сервис, наблюдает симптомы через логи,
 метрики, shell и SQL, затем исправляет причину в workspace.
 
@@ -8,8 +8,9 @@ IncidentSim — тренажёр разбора инцидентов на Go и 
 «работает ли сервис сейчас», quality — «годится ли исправление для продакшена».
 Исправление, которое лишь маскирует симптом, получает `partial_fix`.
 
-Поддерживается только Docker Compose. Других движков, microVM и внешнего аудита
-в проекте нет.
+Docker Compose — основной движок разработки и CI. На Linux-хосте с KVM
+доступен Firecracker; на текущем macOS/KVM-less окружении он не проверяется.
+Teleport остаётся опциональным выключенным адаптером и не входит в основной путь.
 
 ## Быстрый старт
 
@@ -56,3 +57,9 @@ bin/incidentsim validate manifests
 
 На macOS и Linux нужен доступный Docker daemon с Compose v2. Порты сервисов
 публикуются только на `127.0.0.1`; порт PostgreSQL наружу не публикуется.
+
+Для Firecracker на Linux установите pinned release `1.11.0` через
+`ansible/firecracker.yml`, затем запустите ядро с `engine: firecracker` и
+проверьте `incidentsim selfcheck <task>`. На реальном KVM-хосте этот checkout
+не проверен; локальный контрактный тест включается через
+`INCIDENTSIM_TEST_FIRECRACKER=1`.
