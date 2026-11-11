@@ -102,25 +102,51 @@ func Serve(cfg Config, routes func(*http.ServeMux)) {
 
 // RunMigrations applies app/migrations/*.sql in lexical order. Migrations are
 // part of the task surface: a missing index is created by a migration file.
+//
+// The database is a sibling container that may still be initialising, so the
+// set is retried until it succeeds or the deadline passes: a service that
+// exits on the first connection refusal never comes up.
 func RunMigrations(db *sql.DB) {
 	entries, err := os.ReadDir("app/migrations")
 	if err != nil {
 		return
 	}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		lastErr := applyMigrations(db, entries)
+		if lastErr == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Fatalf("%v", lastErr)
+		}
+		log.Printf("migration pending: %v (retrying)", lastErr)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// applyMigrations runs every statement once and stops at the first error.
+func applyMigrations(db *sql.DB, entries []os.DirEntry) error {
+	var applied int
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
 		data, err := os.ReadFile("app/migrations/" + entry.Name())
 		if err != nil {
-			log.Fatalf("read migration %s: %v", entry.Name(), err)
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 		for _, stmt := range splitSQLStatements(string(data)) {
 			if _, err := db.Exec(stmt); err != nil {
-				log.Fatalf("migration %s: %v", entry.Name(), err)
+				return fmt.Errorf("migration %s: %w", entry.Name(), err)
 			}
+			applied++
 		}
 	}
+	if applied > 0 {
+		log.Printf("migrations applied: %d statements", applied)
+	}
+	return nil
 }
 
 // splitSQLStatements splits a migration file into statements on semicolons.
