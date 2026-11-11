@@ -39,6 +39,9 @@ type Session struct {
 	// able to tell what the simulator broke from what the participant did.
 	FaultArtifacts []runtime.EnvPatch `json:"fault_artifacts,omitempty"`
 	LastVerdict    string             `json:"last_verdict,omitempty"`
+	// GaveUp is set when the participant asked for the answer. After a
+	// give-up the private view may be revealed, same as after a pass.
+	GaveUp bool `json:"gave_up,omitempty"`
 	// WorkspaceDir is where the participant's editable code lives for code-level
 	// tasks. It is populated at start by copying from scenarios/<task>/workspace/.
 	WorkspaceDir string `json:"workspace_dir,omitempty"`
@@ -120,6 +123,7 @@ func (s *Session) Snapshot() SessionView {
 		AppliedFixes:   append([]runtime.EnvPatch(nil), s.AppliedFixes...),
 		FaultArtifacts: append([]runtime.EnvPatch(nil), s.FaultArtifacts...),
 		LastVerdict:    s.LastVerdict,
+		GaveUp:         s.GaveUp,
 		WorkspaceDir:   s.WorkspaceDir,
 		Editable:       append([]string(nil), s.manifest.Spec.Editable...),
 		Engine:         "",
@@ -146,6 +150,7 @@ type SessionView struct {
 	// FaultArtifacts is what the simulator changed to create the incident.
 	FaultArtifacts []runtime.EnvPatch `json:"fault_artifacts,omitempty"`
 	LastVerdict    string             `json:"last_verdict,omitempty"`
+	GaveUp         bool               `json:"gave_up,omitempty"`
 	WorkspaceDir   string             `json:"workspace_dir,omitempty"`
 	Editable       []string           `json:"editable,omitempty"`
 	Engine         string             `json:"engine"`

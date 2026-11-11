@@ -97,24 +97,12 @@ func (s *state) fail(w http.ResponseWriter) {
 	http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 }
 
-// BROKEN: the transaction is never closed and its rows are never closed, so
-// every request checks a connection out of the pool for good. The backend
-// holds it in "idle in transaction" until the pool runs dry.
 func (s *state) orders() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests++
 		s.mu.Unlock()
 
-		// BUG: транзакция и rows не закрываются — соединение навсегда остаётся
-		// в пуле. db.Begin() открывает транзакцию без контекста, поэтому
-		// никто не откатывает её при выходе из обработчика, а tx.Query
-		// оставляет результат непрочитанным: соединение остаётся выданным
-		// и держит бэкенд в состоянии idle in transaction.
-		//
-		// Запрос намеренно идёт без дедлайна запроса: отмена контекста на
-		// выходе из обработчика закрыла бы соединение на стороне сервера, и
-		// утечка превратилась бы в самоисцеление вместо инцидента.
 		tx, err := s.db.Begin()
 		if err != nil {
 			s.fail(w)

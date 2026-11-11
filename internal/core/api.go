@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/api/v1/tasks", s.handleTasks)
 	mux.HandleFunc("/api/v1/tasks/", s.handleTaskDetail)
+	mux.HandleFunc("/api/v1/admin/tasks/", s.handleAdminTaskDetail)
 	mux.HandleFunc("/api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/api/v1/sessions/", s.handleSession)
 	return logging(mux)
@@ -71,18 +73,49 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error(), "")
 		return
 	}
+	// Публичный вид: только то, что участник должен знать до решения.
+	// root_cause, theory, reference_solution, distractors отдаются только
+	// через reveal/postmortem (после pass или give-up) и через админ-эндпоинт.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          task.Metadata.ID,
-		"title":       task.Metadata.Title,
-		"level":       task.Metadata.Level,
-		"symptoms":    task.Spec.Symptoms,
-		"root_cause":  task.Spec.RootCause.Summary,
-		"theory":      task.Spec.Theory,
-		"editable":    task.Spec.Editable,
-		"workspace":   task.Spec.Workspace,
-		"reference":   task.Spec.Reference,
-		"distractors": task.Spec.Distractors,
+		"id":       task.Metadata.ID,
+		"title":    task.Metadata.Title,
+		"level":    task.Metadata.Level,
+		"symptoms": task.Spec.Symptoms,
+		"editable": task.Spec.Editable,
 	})
+}
+
+func (s *Server) handleAdminTaskDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.adminEnabled() {
+		writeError(w, http.StatusForbidden, "admin endpoint requires INCIDENTSIM_ADMIN=1", "")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/tasks/")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "task id required", "")
+		return
+	}
+	task, err := s.Orchestrator.Catalog.Load(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":                 task.Metadata.ID,
+		"title":              task.Metadata.Title,
+		"level":              task.Metadata.Level,
+		"symptoms":           task.Spec.Symptoms,
+		"editable":           task.Spec.Editable,
+		"root_cause":         task.Spec.RootCause.Summary,
+		"theory":             task.Spec.Theory,
+		"reference":          task.Spec.Reference,
+		"reference_solution": task.Spec.ReferenceSolution,
+		"distractors":        task.Spec.Distractors,
+	})
+}
+
+func (s *Server) adminEnabled() bool {
+	return os.Getenv("INCIDENTSIM_ADMIN") == "1"
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +201,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleDiff(w, r, session)
 	case "stop":
 		s.handleStop(w, r, session)
+	case "give-up":
+		s.handleGiveUp(w, r, session)
 	default:
 		writeError(w, http.StatusNotFound, "unknown action "+action, "")
 	}
@@ -350,10 +385,21 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request, session *Se
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
 }
 
-// handlePostmortem returns the generated draft of a session report.
+// handlePostmortem returns the generated draft of a session report. The
+// private view (root cause, reference solution) is only shown after the
+// participant has passed verification or given up.
 func (s *Server) handlePostmortem(w http.ResponseWriter, r *http.Request, session *Session) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	ok, err := s.Orchestrator.canReveal(session.ID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "postmortem is available after a passing verification or an explicit give-up", "")
 		return
 	}
 	postmortem, err := s.Orchestrator.GeneratePostmortem(session.ID)
@@ -368,6 +414,20 @@ func (s *Server) handlePostmortem(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	writeJSON(w, http.StatusOK, postmortem)
+}
+
+// handleGiveUp records that the participant asked for the answer. After a
+// give-up the private view may be revealed.
+func (s *Server) handleGiveUp(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	if err := s.Orchestrator.GiveUp(r.Context(), session.ID); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"gave_up": true})
 }
 
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request, session *Session) {

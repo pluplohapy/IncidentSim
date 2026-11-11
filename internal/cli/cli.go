@@ -464,6 +464,16 @@ func (c *Client) Reset(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// GiveUp records that the participant asked for the answer. After a give-up
+// the private view may be revealed via reveal/postmortem.
+func (c *Client) GiveUp(ctx context.Context, sessionID string) error {
+	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/give-up", nil, nil); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.Out, "session %s: gave up\n", sessionID)
+	return nil
+}
+
 // Diff prints the unified diff of the session workspace against the scenario.
 func (c *Client) Diff(ctx context.Context, sessionID string) error {
 	var response struct {

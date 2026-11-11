@@ -937,6 +937,35 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 	return downErr
 }
 
+// GiveUp records that the participant asked for the answer. After a give-up
+// the private view (root cause, reference, distractors) may be revealed, same
+// as after a passing verification.
+func (o *Orchestrator) GiveUp(ctx context.Context, sessionID string) error {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	session.mu.Lock()
+	session.GaveUp = true
+	session.mu.Unlock()
+	session.journal.Record(EventGaveUp, "participant gave up and asked for the answer", nil)
+	return nil
+}
+
+// canReveal reports whether the private view of a task may be shown for a
+// session: after a passing verification or after an explicit give-up.
+func (o *Orchestrator) canReveal(sessionID string) (bool, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return false, err
+	}
+	session.mu.Lock()
+	verdict := session.LastVerdict
+	gaveUp := session.GaveUp
+	session.mu.Unlock()
+	return verdict == verifier.VerdictPass || gaveUp, nil
+}
+
 // removeSessionImage drops the docker image baked from a code-level session
 // workspace. It is best-effort: a missing image or a missing docker binary
 // must not fail teardown.

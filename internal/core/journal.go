@@ -40,6 +40,11 @@ const (
 	// inside the environment, and the journal is the audit trail of that.
 	EventExecRun    = "exec.run"
 	EventExecFailed = "exec.failed"
+
+	// Give-up marks that the participant asked for the answer. After a
+	// give-up the private view (root cause, reference, distractors) may be
+	// revealed, same as after a passing verification.
+	EventGaveUp = "session.gave_up"
 )
 
 // Event is one line of a session journal.

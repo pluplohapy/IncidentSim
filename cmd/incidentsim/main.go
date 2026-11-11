@@ -10,10 +10,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -77,6 +79,8 @@ func run(args []string) error {
 		return resetCmd(args[1:])
 	case "reveal":
 		return revealCmd(args[1:])
+	case "give-up":
+		return giveUpCmd(args[1:])
 	case "postmortem":
 		return postmortemCmd(args[1:])
 	case "stop":
@@ -120,6 +124,7 @@ func usage() {
   incidentsim hint <session> [--level N]                           подсказка по задаче
   incidentsim reset <session>                                      восстановить baseline
   incidentsim reveal <session>                                     ответ и разбор (после pass или give-up)
+  incidentsim give-up <session>                                    сдаться: открытьprivate вид задачи
   incidentsim postmortem <session> [--md]                          постмортем сессии
   incidentsim stop <session>                                       погасить окружение
   incidentsim sessions                                             активные сессии
@@ -534,6 +539,19 @@ func resetCmd(args []string) error {
 	return client(nil).Reset(context.Background(), id)
 }
 
+func giveUpCmd(args []string) error {
+	fs := flag.NewFlagSet("give-up", flag.ExitOnError)
+	sessionFlag := fs.String("session", "__unset__", "id сессии")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := sessionID(*sessionFlag, fs.Args())
+	if err != nil {
+		return err
+	}
+	return client(nil).GiveUp(context.Background(), id)
+}
+
 func revealCmd(args []string) error {
 	fs := flag.NewFlagSet("reveal", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
@@ -587,6 +605,36 @@ func validateCmd(args []string) error {
 	}
 	for _, task := range catalog.List() {
 		fmt.Printf("ok %-28s %s (%d correctness, %d quality checks)\n", task.ID, task.Title, task.Correctness, task.Quality)
+	}
+	// B4: workspace не должен содержать подсказок-спойлеров (BUG/BROKEN/FIXED
+	// и им подобные). Проверка сканирует текст файлов workspace на запретные
+	// слова, чтобы участник не нашёл ответ в заготовке.
+	spoilerRe := regexp.MustCompile(`(?i)\b(bug|broken|fixme|leak)\b`)
+	for _, task := range catalog.List() {
+		workspace := filepath.Join(".", "scenarios", task.ID, "workspace")
+		if err := filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				// Only comments count as spoilers: code may legitimately
+				// mention "leak" in an identifier or a test name.
+				trimmed := strings.TrimSpace(line)
+				if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "/*") && !strings.HasPrefix(trimmed, "*") {
+					continue
+				}
+				if m := spoilerRe.FindStringSubmatch(line); m != nil {
+					return fmt.Errorf("spoiler word %q in comment %q (%s, task %s): workspace must not contain BUG/BROKEN/FIXED-style comments", m[1], trimmed, path, task.ID)
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
