@@ -1,0 +1,119 @@
+---
+# Provisioning a bare-metal Linux host for the Firecracker engine.
+#
+# The playbook installs Firecracker, creates the tap/bridge network the microVMs
+# use, installs the systemd units that own VM lifecycles, builds the rootfs
+# layers from the task images and deploys the baseline snapshot a reset
+# restores.
+#
+# Run order matters: install → network → systemd → rootfs → snapshot.
+- name: Provision the IncidentSim Firecracker host
+  hosts: incidentsim
+  become: true
+  vars_files:
+    - roles/firecracker/defaults/main.yml
+
+  roles:
+    - role: firecracker
+      tags: [firecracker]
+
+  tasks:
+    - name: Install kernel and virtualization tooling
+      ansible.builtin.apt:
+        name:
+          - linux-generic
+          - linux-generic-hwe-24.04
+          - kvm
+          - qemu-utils
+          - squashfs-tools
+          - socat
+          - python3
+        state: present
+        update_cache: true
+      tags: [packages]
+
+    - name: Load the KVM module
+      community.general.modprobe:
+        name: kvm
+        state: present
+      tags: [kvm]
+
+    - name: Load the architecture specific KVM module
+      community.general.modprobe:
+        name: "{{ 'kvm_intel' if ansible_processor_vendor == 'GenuineIntel' else 'kvm_amd' }}"
+        state: present
+      when: ansible_processor_vendor in ['GenuineIntel', 'AuthenticAMD']
+      tags: [kvm]
+
+    - name: Verify KVM is usable
+      ansible.builtin.command:
+        cmd: test -c /dev/kvm
+      changed_when: false
+      tags: [kvm]
+
+    - name: Install Firecracker and the agent binaries
+      ansible.builtin.copy:
+        src: "files/{{ item.src }}"
+        dest: "/usr/local/bin/{{ item.dest }}"
+        mode: "0755"
+      loop:
+        - { src: firecracker, dest: firecracker }
+        - { src: incidentsim-guest, dest: incidentsim-guest }
+        - { src: jailer, dest: jailer }
+      tags: [firecracker]
+
+    - name: Create the state directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ incidentsim_state_dir }}"
+        - "{{ incidentsim_rootfs_dir }}"
+        - "{{ incidentsim_snapshot_dir }}"
+        - "{{ incidentsim_vm_dir }}"
+      tags: [firecracker]
+
+    - name: Download the guest kernel
+      ansible.builtin.get_url:
+        url: "{{ incidentsim_kernel_url }}"
+        dest: "{{ incidentsim_rootfs_dir }}/vmlinux"
+        mode: "0644"
+      tags: [firecracker]
+
+    - name: Authorise the simulator user to run firecracker
+      ansible.builtin.user:
+        name: "{{ incidentsim_user }}"
+        groups: [kvm]
+        append: true
+      tags: [firecracker]
+
+    - name: Install the baseline provisioning unit
+      ansible.builtin.template:
+        src: templates/incidentsim-baseline.service.j2
+        dest: /etc/systemd/system/incidentsim-baseline.service
+        mode: "0644"
+      notify: Reload systemd
+      tags: [systemd]
+
+    - name: Install the per-VM lifecycle unit template
+      ansible.builtin.template:
+        src: templates/incidentsim-vm@.service.j2
+        dest: /etc/systemd/system/incidentsim-vm@.service
+        mode: "0644"
+      notify: Reload systemd
+      tags: [systemd]
+
+    - name: Enable the baseline unit
+      ansible.builtin.systemd:
+        name: incidentsim-baseline.service
+        enabled: true
+        state: started
+      tags: [systemd]
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

@@ -1,0 +1,32 @@
+#!/bin/bash
+# Network setup of the IncidentSim Firecracker host.
+#
+# A bridge the host owns, one tap device per microVM. The guest sees a private
+# subnet and nothing else, so a participant cannot reach the outside network
+# from inside a task, while the host can still reach the guest to scrape it.
+set -euo pipefail
+
+BRIDGE="{{ incidentsim_bridge }}"
+CIDR="{{ incidentsim_bridge_cidr }}"
+TAPS={{ incidentsim_tap_count | int }}
+
+if ! ip link show "$BRIDGE" >/dev/null 2>&1; then
+    ip link add name "$BRIDGE" type bridge
+fi
+ip addr add "$CIDR" dev "$BRIDGE" 2>/dev/null || true
+ip link set "$BRIDGE" up
+
+for index in $(seq 0 $((TAPS - 1))); do
+    tap="incidentsim-tap${index}"
+    if ! ip link show "$tap" >/dev/null 2>&1; then
+        ip tuntap add dev "$tap" mode tap
+    fi
+    ip link set "$tap" master "$BRIDGE"
+    ip link set "$tap" up
+done
+
+# Only the microVM subnet is forwarded; the guest has no default route.
+iptables -t nat -C POSTROUTING -s 172.30.0.0/24 ! -o "$BRIDGE" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s 172.30.0.0/24 ! -o "$BRIDGE" -j MASQUERADE
+
+echo "incidentsim network ready: bridge $BRIDGE, $TAPS tap devices"
