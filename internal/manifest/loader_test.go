@@ -216,16 +216,29 @@ func TestLoadRejectsInvalidCatalogFiles(t *testing.T) {
 }
 
 func TestLoaderLoadsWholeCatalogSortedByID(t *testing.T) {
-	loader := NewLoader("../../testdata/manifests/valid")
+	// The fixture directory above is for focused parser tests. Catalog tests
+	// must exercise the repository's real manifests and their workspace assets.
+	loader := NewLoader("../../manifests")
 	manifests, err := loader.LoadDir()
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
 	}
-	if len(manifests) != 2 {
-		t.Fatalf("loaded %d manifests, want 2", len(manifests))
+	if len(manifests) < 4 {
+		t.Fatalf("loaded %d manifests, want at least the four checked-in tasks", len(manifests))
 	}
-	if manifests[0].Metadata.ID != "db-connection-leak" || manifests[1].Metadata.ID != "log-flood-disk" {
-		t.Fatalf("catalog order = %s, %s", manifests[0].Metadata.ID, manifests[1].Metadata.ID)
+	for i := 1; i < len(manifests); i++ {
+		if manifests[i-1].Metadata.ID >= manifests[i].Metadata.ID {
+			t.Fatalf("catalog is not sorted at %d: %s, %s", i, manifests[i-1].Metadata.ID, manifests[i].Metadata.ID)
+		}
+	}
+	ids := make(map[string]bool, len(manifests))
+	for _, m := range manifests {
+		ids[m.Metadata.ID] = true
+	}
+	for _, want := range []string{"cache-avalanche-retry-storm", "db-connection-leak", "log-flood-disk", "pg-table-bloat"} {
+		if !ids[want] {
+			t.Fatalf("real catalog is missing %q", want)
+		}
 	}
 }
 
