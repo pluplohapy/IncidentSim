@@ -276,11 +276,14 @@ func validateReplayHooks(field string, replay *ReplaySpec) []Issue {
 		return nil
 	}
 	var issues []Issue
+	replayDuration, durationErr := time.ParseDuration(replay.Duration)
 	for i, hook := range replay.Hooks {
 		path := fmt.Sprintf("%s.hooks[%d]", field, i)
 		offset, err := time.ParseDuration(hook.At)
 		if err != nil || offset < 0 {
 			issues = append(issues, Issue{Field: path + ".at", Message: "must be a non-negative duration"})
+		} else if durationErr == nil && offset > replayDuration {
+			issues = append(issues, Issue{Field: path + ".at", Message: "must not exceed replay duration"})
 		}
 		switch hook.Do {
 		case "restart_service", "kill_service", "stub_control", "sql", "exec":

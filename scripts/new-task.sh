@@ -9,7 +9,7 @@ fi
 
 id="$1"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-for dir in "manifests/$id" "scenarios/$id/workspace" "scenarios/$id/reference"; do
+for dir in "manifests/$id.yaml" "scenarios/$id/workspace" "scenarios/$id/reference"; do
   if [[ -e "$root/$dir" ]]; then
     echo "refusing to overwrite $dir" >&2
     exit 1

@@ -133,6 +133,9 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 		// failure: fail the check instead of guessing.
 		return ReplayResult{}, fmt.Errorf("replay duration %q is not usable: %w", config.Duration, err)
 	}
+	if len(config.Hooks) > 0 && r.Hook == nil {
+		return ReplayResult{}, fmt.Errorf("replay declares %d hook(s), but no hook executor is configured", len(config.Hooks))
+	}
 
 	// Build a deterministic weighted scheduler. Each request is repeated
 	// weight times in a shuffled slice; the seed makes the order reproducible.
@@ -151,9 +154,6 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 		offset, parseErr := time.ParseDuration(hook.At)
 		if parseErr != nil || offset < 0 || offset > duration {
 			return ReplayResult{}, fmt.Errorf("replay hook %q has invalid at %q", hook.Do, hook.At)
-		}
-		if r.Hook == nil {
-			continue
 		}
 		hookWG.Add(1)
 		go func(h ReplayHook, at time.Duration) {
