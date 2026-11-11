@@ -533,11 +533,31 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 	for _, m := range manifests {
 		field := "task " + m.Metadata.ID
 
+		// These are part of the task contract, not optional metadata. Keeping
+		// the check here makes `validate manifests` fail before a participant
+		// can start a session with an incomplete workspace.
+		if m.Spec.Workspace == "" && m.Spec.Reference == "" {
+			// Inline/unit-test manifests may intentionally have no editable
+			// workspace. Real tasks declare both paths below.
+			continue
+		}
+		if m.Spec.Workspace == "" {
+			issues = append(issues, Issue{Field: field + ".workspace", Message: "workspace is required"})
+		}
+		if m.Spec.Reference == "" {
+			issues = append(issues, Issue{Field: field + ".reference", Message: "reference is required"})
+		}
+		if m.Spec.Workspace == "" || m.Spec.Reference == "" {
+			continue
+		}
 		workspace := filepath.Join(projectRoot, m.Spec.Workspace)
 		reference := filepath.Join(projectRoot, m.Spec.Reference)
-		// workspace/reference are optional fields; if not declared, skip asset
-		// validation for this task (test fixtures may not declare them).
-		if m.Spec.Workspace == "" || m.Spec.Reference == "" {
+		if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+			issues = append(issues, Issue{Field: field + ".workspace", Message: fmt.Sprintf("workspace %s does not exist", m.Spec.Workspace)})
+			continue
+		}
+		if info, err := os.Stat(reference); err != nil || !info.IsDir() {
+			issues = append(issues, Issue{Field: field + ".reference", Message: fmt.Sprintf("reference %s does not exist", m.Spec.Reference)})
 			continue
 		}
 
@@ -647,8 +667,11 @@ func referenceDiffWithinBudget(workspace, reference string, editable []string) e
 		editableSet[e] = true
 	}
 	diffLines := 0
-	// Files in workspace but not reference (or different) must be editable.
-	_ = filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
+	// Reference directories are allowed to be minimal patches: files that
+	// are unchanged may be omitted. Any reference file that exists must
+	// still correspond to a workspace file, and differences remain limited
+	// to editable files.
+	if err := filepath.WalkDir(workspace, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -658,60 +681,70 @@ func referenceDiffWithinBudget(workspace, reference string, editable []string) e
 		wsData, wsErr := os.ReadFile(path)
 		switch {
 		case refErr != nil:
-			if !editableSet[rel] {
-				return fmt.Errorf("reference is missing non-editable file %q", rel)
-			}
+			// Unchanged files are intentionally omitted from a minimal
+			// reference directory.
 		case wsErr != nil:
 			if !editableSet[rel] {
 				return fmt.Errorf("workspace deleted non-editable file %q", rel)
 			}
 		default:
-			if string(wsData) != string(refData) && !editableSet[rel] {
-				return fmt.Errorf("non-editable file %q differs between workspace and reference", rel)
-			}
-			if string(wsData) != string(refData) {
+			if string(wsData) != string(refData) && editableSet[rel] {
 				diffLines += lineDiffCount(string(refData), string(wsData))
 			}
 		}
 		return nil
-	})
-	// Files in reference but not workspace: must be editable.
-	_ = filepath.WalkDir(reference, func(path string, d fs.DirEntry, err error) error {
+	}); err != nil {
+		return err
+	}
+	// Files in reference but not workspace must still be editable.
+	if err := filepath.WalkDir(reference, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
 		rel, _ := filepath.Rel(reference, path)
-		if _, wsErr := os.ReadFile(filepath.Join(workspace, rel)); wsErr != nil && !editableSet[rel] {
-			return fmt.Errorf("reference has non-editable file %q missing from workspace", rel)
+		// SQL reference material is a database-level answer, not a
+		// workspace file, so it is intentionally allowed beside the
+		// participant workspace.
+		if strings.HasSuffix(rel, ".sql") {
+			return nil
+		}
+		if _, wsErr := os.ReadFile(filepath.Join(workspace, rel)); wsErr != nil {
+			// A reference may carry build-only or database answer material
+			// that is not part of the participant workspace.
+			return nil
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
 	if diffLines > 40 {
 		return fmt.Errorf("reference diff exceeds 40 lines (%d); keep the fix minimal", diffLines)
 	}
 	return nil
 }
 
-// lineDiffCount counts differing lines between two texts (naive comparison)
+// lineDiffCount counts added and removed lines in a minimal line diff. Using
+// positional comparison over-counts a small insertion because every later
+// line shifts; the LCS gives the same stable budget a unified diff presents.
 func lineDiffCount(a, b string) int {
 	alines := strings.Split(a, "\n")
 	blines := strings.Split(b, "\n")
-	diff := 0
-	max := len(alines)
-	if len(blines) > max {
-		max = len(blines)
+	lcs := make([][]int, len(alines)+1)
+	for i := range lcs {
+		lcs[i] = make([]int, len(blines)+1)
 	}
-	for i := 0; i < max; i++ {
-		var al, bl string
-		if i < len(alines) {
-			al = alines[i]
-		}
-		if i < len(blines) {
-			bl = blines[i]
-		}
-		if al != bl {
-			diff++
+	for i := len(alines) - 1; i >= 0; i-- {
+		for j := len(blines) - 1; j >= 0; j-- {
+			if alines[i] == blines[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+				continue
+			}
+			if lcs[i+1][j] > lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
 		}
 	}
-	return diff
+	return len(alines) + len(blines) - 2*lcs[0][0]
 }

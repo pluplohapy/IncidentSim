@@ -305,7 +305,10 @@ func (r *ReplayRunner) request(ctx context.Context, client *http.Client, endpoin
 		return sample{latency: latency, err: err}
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if readErr != nil {
+		return sample{status: resp.StatusCode, latency: latency, err: readErr}
+	}
 
 	// Evaluate expectations. A non-matching status or body counts as an error
 	// even when the connection succeeded. By default a 5xx is an error;
@@ -319,13 +322,11 @@ func (r *ReplayRunner) request(ctx context.Context, client *http.Client, endpoin
 		ok = false
 	}
 	if ok && request.ExpectBodyRegex != nil {
-		body, _ := io.ReadAll(resp.Body)
 		if matched, _ := regexp.MatchString(*request.ExpectBodyRegex, string(body)); !matched {
 			ok = false
 		}
 	}
 	if ok && request.ExpectBodyAbsent != nil {
-		body, _ := io.ReadAll(resp.Body)
 		if matched, _ := regexp.MatchString(*request.ExpectBodyAbsent, string(body)); matched {
 			ok = false
 		}

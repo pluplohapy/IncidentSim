@@ -473,10 +473,10 @@ func applyCmd(args []string) error {
 	}
 	c := client(nil)
 	if statement := flagValue(args, "--sql", ""); statement != "" {
+		if *service == "" {
+			return fmt.Errorf("--service is required for --sql; use incidentsim sql <session> for SQL fixes")
+		}
 		return c.ExecSQL(context.Background(), id, *service, statement)
-	}
-	if *service == "" {
-		return fmt.Errorf("--service is required")
 	}
 	sets := multiFlag(args, "--set")
 	if len(sets) > 0 {
@@ -485,34 +485,17 @@ func applyCmd(args []string) error {
 	files := multiFileFlag(args, "--file")
 	contents := multiFlag(args, "--content")
 	fileFromRef := multiFlag(args, "--file-from-reference")
+	if len(files) > 0 || len(contents) > 0 || len(fileFromRef) > 0 {
+		return fmt.Errorf("--file/--content оставлены только для внутреннего API: правите workspace и запускайте incidentsim apply <session>")
+	}
 	if len(files) != len(contents) {
 		return fmt.Errorf("each --file must have a matching --content")
 	}
-	fileMap := map[string]string{}
-	for i, f := range files {
-		fileMap[f] = contents[i]
-	}
-	projectRoot, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	for _, refPath := range fileFromRef {
-		referenceDir, err := taskReferenceDir(projectRoot, c, id)
-		if err != nil {
-			return err
-		}
-		content, err := readReferenceFile(referenceDir, refPath)
-		if err != nil {
-			return err
-		}
-		fileMap[refPath] = content
-	}
-	patch, err := core.ParseEnvPatch(*service, sets, !*noRestart)
-	if err != nil {
-		return err
-	}
-	patch.Files = fileMap
-	return c.Apply(context.Background(), id, *service, nil, patch.Files, patch.Restart)
+	// The public command deliberately has no patch payload. The participant
+	// edits the session workspace, and the core validates and deploys its
+	// current contents. File/content flags remain an internal HTTP API used by
+	// selfcheck and CI.
+	return c.Apply(context.Background(), id, *service, nil, nil, !*noRestart)
 }
 
 func verifyCmd(args []string) error {

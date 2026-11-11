@@ -28,12 +28,6 @@ spec:
   hints:
     - level: 1
       text: "Посмотрите на размер файла лога и на уровень логирования"
-  fault:
-    type: feature_flag
-    target: app
-    options:
-      env:
-        LOG_LEVEL: debug
   verify:
     correctness:
       - id: healthz-200

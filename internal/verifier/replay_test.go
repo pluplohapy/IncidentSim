@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,41 @@ func TestReplayRunnerFailsWithoutEndpoint(t *testing.T) {
 	_, err := runner.Replay(context.Background(), "", nil, ReplayConfig{Duration: "1s"})
 	if err == nil {
 		t.Fatal("an empty endpoint was accepted")
+	}
+}
+
+func TestReplayRunnerEvaluatesResponseBodyExpectations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("X-Incident") != "true" {
+			t.Fatalf("request = %s %s, header=%q", r.Method, r.URL.Path, r.Header.Get("X-Incident"))
+		}
+		body := make([]byte, r.ContentLength)
+		if _, err := r.Body.Read(body); err != nil && !strings.Contains(err.Error(), "EOF") {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != `{"id":1}` {
+			t.Fatalf("body = %q", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"status":"created"}`))
+	}))
+	defer server.Close()
+
+	wantStatus := 201
+	wantBody := `created`
+	result, err := (&ReplayRunner{Now: time.Now}).Replay(context.Background(), server.URL, []Request{{
+		Method:          http.MethodPost,
+		Path:            "/api/orders",
+		Headers:         map[string]string{"X-Incident": "true"},
+		Body:            `{"id":1}`,
+		ExpectStatus:    &wantStatus,
+		ExpectBodyRegex: &wantBody,
+	}}, ReplayConfig{Duration: "20ms", RPS: 20})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if result.Errors != 0 || result.Requests == 0 {
+		t.Fatalf("result = %+v, want successful body-checked requests", result)
 	}
 }
 
