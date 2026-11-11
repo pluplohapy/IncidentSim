@@ -21,8 +21,8 @@ type Config struct {
 	Catalog string `yaml:"catalog"`
 	// State is the directory holding journals and scratch compose projects.
 	State string `yaml:"state"`
-	// Engine selects the runtime adapter. Docker Compose is the only supported
-	// engine.
+	// Engine selects the runtime adapter: compose for local development or
+	// firecracker on a Linux host with KVM.
 	Engine string `yaml:"engine"`
 
 	// path is the file the config was loaded from, for error messages.

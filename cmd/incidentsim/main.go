@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"incidentsim/internal/adapters/compose"
+	"incidentsim/internal/adapters/firecracker"
 	"incidentsim/internal/cli"
 	"incidentsim/internal/core"
 	"incidentsim/internal/injector"
@@ -171,10 +172,13 @@ func serve(args []string) error {
 		return err
 	}
 
-	if config.Engine != "compose" {
-		return fmt.Errorf("unsupported engine %q: only docker compose is supported", config.Engine)
+	adapters := map[string]runtime.Adapter{
+		"compose":     compose.New(config.StateDir()),
+		"firecracker": firecracker.New(firecracker.DefaultConfig()),
 	}
-	adapters := map[string]runtime.Adapter{"compose": compose.New(config.StateDir())}
+	if _, ok := adapters[config.Engine]; !ok {
+		return fmt.Errorf("unsupported engine %q (have compose, firecracker)", config.Engine)
+	}
 
 	grader := verifier.NewManifestVerifier()
 	grader.ProjectDir = config.ProjectDir()
