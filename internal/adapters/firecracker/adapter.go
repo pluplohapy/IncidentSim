@@ -116,6 +116,20 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	}
 	a.sessions[sessionID] = machine
 	a.mu.Unlock()
+	started := false
+	defer func() {
+		if started {
+			return
+		}
+		if machine.process != nil && machine.process.Process != nil {
+			_ = machine.process.Process.Kill()
+			_, _ = machine.process.Process.Wait()
+		}
+		_ = os.RemoveAll(machine.workdir)
+		a.mu.Lock()
+		delete(a.sessions, sessionID)
+		a.mu.Unlock()
+	}()
 
 	if err := os.MkdirAll(machine.workdir, 0o755); err != nil {
 		return nil, fmt.Errorf("create vm dir: %w", err)
@@ -147,6 +161,7 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	if err := runtime.WaitForHealth(ctx, instance, runtime.DefaultUpTimeout); err != nil {
 		return nil, err
 	}
+	started = true
 	return instance, nil
 }
 
