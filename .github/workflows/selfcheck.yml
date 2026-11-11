@@ -55,6 +55,21 @@ jobs:
           key: ${{ runner.os }}-buildx-${{ matrix.task }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-buildx-${{ matrix.task }}-
+      - name: Build workload image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/workload.Dockerfile
+          tags: incidentsim/workload:dev
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+      - name: Update Buildx cache
+        run: |
+          if [ -d /tmp/.buildx-cache-new ]; then
+            rm -rf /tmp/.buildx-cache
+            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          fi
       - run: go build -o bin/incidentsim ./cmd/incidentsim
       - name: Start core
         env:
