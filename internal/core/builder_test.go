@@ -1,6 +1,8 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -24,5 +26,19 @@ func TestGoBuilderContainerArgsAreBoundedAndCrossCompileForHostArch(t *testing.T
 		if got[i] != want[i] {
 			t.Fatalf("containerArgs() = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestBuildTargetPrefersScenarioAppDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app", "main.go"), []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := buildTarget(dir)
+	if err != nil || got != "./app" {
+		t.Fatalf("buildTarget() = %q, %v; want ./app, nil", got, err)
 	}
 }
