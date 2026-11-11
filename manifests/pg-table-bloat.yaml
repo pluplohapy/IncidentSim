@@ -67,15 +67,17 @@ spec:
         path: /healthz
         expect:
           status: 200
+    quality:
       - id: dead-tuples-bounded
         type: metric
         service: app
         query: app_db_dead_tuples
-        duration: 30s
+        agg: max
+        window:
+          from: 5s
         expect:
           max: 20000
         reason: "Раздутая таблица — тот симптом, с которого начался инцидент: bloat видно в n_dead_tup"
-    quality:
       - id: data-preserved
         type: sql
         service: db

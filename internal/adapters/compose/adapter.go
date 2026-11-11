@@ -480,7 +480,18 @@ func (a *Adapter) buildBinaryImage(ctx context.Context, project *session, art ru
 	if arch == "" {
 		arch = "amd64"
 	}
-	dockerfile := fmt.Sprintf("FROM alpine:3.20\nCOPY app /usr/local/bin/app\nENTRYPOINT [\"/usr/local/bin/app\"]\n")
+	// The stand applies app/migrations/*.sql at boot, so the task migrations
+	// travel with the binary: the service must come up with the schema the
+	// workspace declares, not with whatever a fault injector happened to run.
+	migrations := filepath.Join(project.spec.WorkspaceDir, "app", "migrations")
+	dockerfile := "FROM alpine:3.20\nCOPY app /usr/local/bin/app\nCOPY migrations /app/migrations\nWORKDIR /\nENTRYPOINT [\"/usr/local/bin/app\"]\n"
+	if entries, err := os.ReadDir(migrations); err == nil && len(entries) > 0 {
+		if err := os.CopyFS(filepath.Join(dir, "migrations"), os.DirFS(migrations)); err != nil {
+			return "", fmt.Errorf("copy migrations into image context: %w", err)
+		}
+	} else {
+		dockerfile = "FROM alpine:3.20\nCOPY app /usr/local/bin/app\nRUN mkdir -p /app/migrations\nWORKDIR /\nENTRYPOINT [\"/usr/local/bin/app\"]\n"
+	}
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
 		return "", fmt.Errorf("write Dockerfile: %w", err)
 	}

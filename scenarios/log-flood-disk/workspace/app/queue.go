@@ -175,9 +175,3 @@ func (q *JobQueue) QueueInvariant() InvariantChecker {
 		return true, "queue healthy"
 	}
 }
-
-// sqlCounter increments the db query counter and runs a query.
-func (s *State) withDBQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
-	s.incDBQueries()
-	return db.Query(query, args...)
-}
