@@ -123,6 +123,38 @@ func TestReplayRunnerStopsWhenContextEnds(t *testing.T) {
 	}
 }
 
+func TestReplayRunnerExecutesScheduledHook(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	hooks := make(chan ReplayHook, 1)
+	runner := &ReplayRunner{
+		Now: time.Now,
+		Hook: func(_ context.Context, hook ReplayHook) error {
+			hooks <- hook
+			return nil
+		},
+	}
+	_, err := runner.Replay(context.Background(), server.URL, []Request{{Path: "/healthz"}}, ReplayConfig{
+		Duration: "30ms",
+		RPS:      20,
+		Hooks:    []ReplayHook{{At: "0ms", Do: "exec", Service: "app", Command: []string{"true"}}},
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	select {
+	case hook := <-hooks:
+		if hook.Do != "exec" || hook.Service != "app" {
+			t.Fatalf("hook = %+v", hook)
+		}
+	default:
+		t.Fatal("scheduled hook was not executed")
+	}
+}
+
 func TestLoadReplayProfileValidatesItsContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "workloads.yaml")

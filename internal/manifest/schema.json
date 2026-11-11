@@ -277,7 +277,23 @@
         "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
         "rps": { "type": "integer", "minimum": 1 },
         "concurrency": { "type": "integer", "minimum": 1 },
-        "target_service": { "type": "string" }
+        "target_service": { "type": "string" },
+        "hooks": { "type": "array", "items": { "$ref": "#/$defs/replayHook" } }
+      }
+    },
+
+    "replayHook": {
+      "type": "object",
+      "required": ["at", "do"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
+        "do": { "enum": ["restart_service", "kill_service", "stub_control", "sql", "exec"] },
+        "service": { "type": "string" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "sql": { "type": "string" },
+        "vars": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": { "type": "string" }
       }
     },
 

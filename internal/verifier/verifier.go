@@ -180,11 +180,12 @@ type Environment interface {
 // ReplayConfig is the load a verification replays. Replaying load is what keeps
 // a task from being "fixed" by stopping the service.
 type ReplayConfig struct {
-	Profile       string `json:"profile,omitempty"`
-	Duration      string `json:"duration,omitempty"`
-	RPS           int    `json:"rps,omitempty"`
-	Concurrency   int    `json:"concurrency,omitempty"`
-	TargetService string `json:"target_service,omitempty"`
+	Profile       string       `json:"profile,omitempty"`
+	Duration      string       `json:"duration,omitempty"`
+	RPS           int          `json:"rps,omitempty"`
+	Concurrency   int          `json:"concurrency,omitempty"`
+	TargetService string       `json:"target_service,omitempty"`
+	Hooks         []ReplayHook `json:"hooks,omitempty"`
 }
 
 // Verifier grades one run. The first implementation runs manifest checks; the

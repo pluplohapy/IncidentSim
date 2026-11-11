@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -228,6 +229,8 @@ func validateFault(field string, fault FaultSpec, services []string) []Issue {
 
 func (m *Manifest) validateChecks() []Issue {
 	var issues []Issue
+	issues = append(issues, validateReplayHooks("spec.replay", m.Spec.Replay)...)
+	issues = append(issues, validateReplayHooks("spec.verify.replay", m.Spec.Verify.Replay)...)
 	services := m.serviceNames()
 
 	for gate, checks := range map[string][]Check{
@@ -263,6 +266,26 @@ func (m *Manifest) validateChecks() []Issue {
 				Field:   field,
 				Message: "quality gate must contain at least one artefact check (policy, sql, log or exec): behaviour alone cannot tell a fix from a mask",
 			})
+		}
+	}
+	return issues
+}
+
+func validateReplayHooks(field string, replay *ReplaySpec) []Issue {
+	if replay == nil {
+		return nil
+	}
+	var issues []Issue
+	for i, hook := range replay.Hooks {
+		path := fmt.Sprintf("%s.hooks[%d]", field, i)
+		offset, err := time.ParseDuration(hook.At)
+		if err != nil || offset < 0 {
+			issues = append(issues, Issue{Field: path + ".at", Message: "must be a non-negative duration"})
+		}
+		switch hook.Do {
+		case "restart_service", "kill_service", "stub_control", "sql", "exec":
+		default:
+			issues = append(issues, Issue{Field: path + ".do", Message: "unknown hook action"})
 		}
 	}
 	return issues

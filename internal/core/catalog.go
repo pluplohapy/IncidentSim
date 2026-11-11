@@ -135,9 +135,21 @@ func Checks(m *manifest.Manifest) verifier.CheckSet {
 			RPS:           replay.RPS,
 			Concurrency:   replay.Concurrency,
 			TargetService: replay.TargetService,
+			Hooks:         projectReplayHooks(replay.Hooks),
 		}
 	}
 	return set
+}
+
+func projectReplayHooks(hooks []manifest.ReplayHook) []verifier.ReplayHook {
+	out := make([]verifier.ReplayHook, 0, len(hooks))
+	for _, hook := range hooks {
+		out = append(out, verifier.ReplayHook{
+			At: hook.At, Do: hook.Do, Service: hook.Service, Command: hook.Command,
+			SQL: hook.SQL, Vars: hook.Vars, Body: hook.Body,
+		})
+	}
+	return out
 }
 
 func projectChecks(checks []manifest.Check, gate verifier.Gate) []verifier.Check {

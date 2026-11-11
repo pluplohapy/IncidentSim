@@ -40,6 +40,19 @@ type ReplayRunner struct {
 	// Seed makes the weighted scheduler deterministic. Zero means no seed
 	// (still weighted, but not reproducible).
 	Seed int64
+	// Hook executes a scheduled action. A nil hook keeps replay load-only.
+	Hook func(context.Context, ReplayHook) error
+}
+
+// ReplayHook is an action scheduled at an offset from replay start.
+type ReplayHook struct {
+	At      string            `json:"at"`
+	Do      string            `json:"do"`
+	Service string            `json:"service,omitempty"`
+	Command []string          `json:"command,omitempty"`
+	SQL     string            `json:"sql,omitempty"`
+	Vars    map[string]string `json:"vars,omitempty"`
+	Body    string            `json:"body,omitempty"`
 }
 
 // ReplayResult summarises one replay run.
@@ -130,6 +143,33 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 	defer ticker.Stop()
 
 	deadline := now().Add(duration)
+	hookCtx, cancelHooks := context.WithCancel(ctx)
+	defer cancelHooks()
+	var hookWG sync.WaitGroup
+	hookErrors := make(chan error, len(config.Hooks))
+	for _, hook := range config.Hooks {
+		offset, parseErr := time.ParseDuration(hook.At)
+		if parseErr != nil || offset < 0 || offset > duration {
+			return ReplayResult{}, fmt.Errorf("replay hook %q has invalid at %q", hook.Do, hook.At)
+		}
+		if r.Hook == nil {
+			continue
+		}
+		hookWG.Add(1)
+		go func(h ReplayHook, at time.Duration) {
+			defer hookWG.Done()
+			timer := time.NewTimer(at)
+			defer timer.Stop()
+			select {
+			case <-hookCtx.Done():
+				return
+			case <-timer.C:
+			}
+			if err := r.Hook(hookCtx, h); err != nil {
+				hookErrors <- err
+			}
+		}(hook, offset)
+	}
 	var (
 		count           atomic.Int64
 		failures        atomic.Int64
@@ -212,6 +252,13 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 		}(req)
 	}
 	wg.Wait()
+	cancelHooks()
+	hookWG.Wait()
+	select {
+	case err := <-hookErrors:
+		return ReplayResult{}, fmt.Errorf("replay hook: %w", err)
+	default:
+	}
 
 	result := ReplayResult{
 		Requests:          int(count.Load()),

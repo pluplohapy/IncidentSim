@@ -222,11 +222,23 @@ type ReferenceSolution struct {
 
 // ReplaySpec configures the load replayed during verification.
 type ReplaySpec struct {
-	Profile       string `yaml:"profile" json:"profile"`
-	Duration      string `yaml:"duration" json:"duration"`
-	RPS           int    `yaml:"rps,omitempty" json:"rps,omitempty"`
-	Concurrency   int    `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
-	TargetService string `yaml:"target_service,omitempty" json:"target_service,omitempty"`
+	Profile       string       `yaml:"profile" json:"profile"`
+	Duration      string       `yaml:"duration" json:"duration"`
+	RPS           int          `yaml:"rps,omitempty" json:"rps,omitempty"`
+	Concurrency   int          `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	TargetService string       `yaml:"target_service,omitempty" json:"target_service,omitempty"`
+	Hooks         []ReplayHook `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+}
+
+// ReplayHook performs an action at an offset in a replay.
+type ReplayHook struct {
+	At      string            `yaml:"at" json:"at"`
+	Do      string            `yaml:"do" json:"do"`
+	Service string            `yaml:"service,omitempty" json:"service,omitempty"`
+	Command []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	SQL     string            `yaml:"sql,omitempty" json:"sql,omitempty"`
+	Vars    map[string]string `yaml:"vars,omitempty" json:"vars,omitempty"`
+	Body    string            `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
 // Distractor describes an action that hides the symptom without removing the

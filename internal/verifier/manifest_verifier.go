@@ -162,11 +162,62 @@ func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, check
 	if target == "" {
 		return ReplayResult{Error: "no reachable replay target"}
 	}
-	result, err := v.ReplayRunner.Replay(ctx, target, requests, *config)
+	runner := *v.ReplayRunner
+	runner.Hook = func(hookCtx context.Context, hook ReplayHook) error {
+		return v.applyReplayHook(hookCtx, env, hook)
+	}
+	result, err := runner.Replay(ctx, target, requests, *config)
 	if err != nil {
 		return ReplayResult{Error: err.Error()}
 	}
 	return result
+}
+
+func (v *ManifestVerifier) applyReplayHook(ctx context.Context, env Environment, hook ReplayHook) error {
+	if hook.Service == "" {
+		return fmt.Errorf("%s hook requires service", hook.Do)
+	}
+	switch hook.Do {
+	case "restart_service":
+		_, err := env.Runtime().Apply(ctx, env.InstanceID(), runtime.EnvPatch{Service: hook.Service, Vars: hook.Vars, Restart: true})
+		return err
+	case "kill_service":
+		_, err := env.Runtime().Exec(ctx, env.InstanceID(), runtime.ExecRequest{Service: hook.Service, Command: []string{"sh", "-c", "kill -TERM 1"}, Timeout: 5 * time.Second})
+		return err
+	case "exec":
+		if len(hook.Command) == 0 {
+			return fmt.Errorf("exec hook requires command")
+		}
+		_, err := env.Runtime().Exec(ctx, env.InstanceID(), runtime.ExecRequest{Service: hook.Service, Command: hook.Command, Timeout: 30 * time.Second})
+		return err
+	case "sql":
+		if hook.SQL == "" {
+			return fmt.Errorf("sql hook requires sql")
+		}
+		_, err := env.SQL(ctx, hook.Service, hook.SQL)
+		return err
+	case "stub_control":
+		endpoint := endpointFor(env.Instance(), hook.Service)
+		if endpoint == "" {
+			return fmt.Errorf("service %q has no reachable endpoint", hook.Service)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+endpoint+"/control", strings.NewReader(hook.Body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("stub control returned %s", resp.Status)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown replay hook %q", hook.Do)
+	}
 }
 
 // replayTarget resolves the endpoint the replay should load.
