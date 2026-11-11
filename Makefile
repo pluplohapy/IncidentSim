@@ -66,3 +66,7 @@ colima: ## Start the local Linux VM on macOS (Colima + Docker)
 .PHONY: run-dev
 run-dev: build ## Run the core API against the compose catalog
 	./bin/$(BINARY) serve --config incidentsim.yaml
+
+.PHONY: ansible-check
+ansible-check: ## Validate Firecracker provisioning playbook syntax
+	ansible-playbook --syntax-check -i ansible/inventory.example.yml ansible/firecracker.yml
