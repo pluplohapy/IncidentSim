@@ -46,6 +46,20 @@ Workspace и эталон находятся в `scenarios/<id>/`. Для code-�
 `go.mod` и `go.sum` не редактируются; reference отличается от workspace только
 в editable-файлах. Полный контракт — в [docs/adding-a-task.md](docs/adding-a-task.md).
 
+Текущий проверенный каталог задач:
+
+| ID | Уровень | Стенд |
+|---|---|---|
+| `cache-avalanche-retry-storm` | composite | app + cache + db |
+| `db-connection-leak` | code | app + PostgreSQL |
+| `log-flood-disk` | config | app + tmpfs |
+| `pg-table-bloat` | db | app + PostgreSQL |
+
+Пул из 24 code-level стендов из проектного плана ещё не закрыт: эти четыре —
+единственные задачи, для которых в checkout есть реальные стенды и манифесты.
+Новую задачу можно начать через `scripts/new-task.sh`, но TODO нужно заменить
+рабочим стендом до включения в каталог.
+
 ## Разработка
 
 ```console
