@@ -251,7 +251,7 @@ func TestLoaderFailsOnBrokenCatalog(t *testing.T) {
 
 func TestLoadTaskByID(t *testing.T) {
 	loader := NewLoader("../../testdata/manifests/valid")
-	m, err := loader.LoadTask("db-connection-leak")
+	m, err := loader.LoadTask("fixture-code")
 	if err != nil {
 		t.Fatalf("LoadTask: %v", err)
 	}
@@ -286,7 +286,9 @@ func TestValidateWithAssetsChecksReplayProfile(t *testing.T) {
 		t.Fatalf("assets present but rejected: %v", err)
 	}
 
-	m.Spec.Replay.Profile = "workloads/missing.yaml"
+	// The replay profile lives under spec.verify.replay; a task that declares
+	// a profile which does not exist must be rejected.
+	m.Spec.Verify.Replay.Profile = "workloads/missing.yaml"
 	if err := m.ValidateWithAssets("../../testdata"); err == nil {
 		t.Fatal("missing replay profile accepted")
 	}
