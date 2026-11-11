@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -77,7 +78,11 @@ func envInt(key string, fallback int) int {
 // endpoint reports honestly (db.Stats(), runtime.NumGoroutine,
 // /proc/self/fd, uptime).
 type State struct {
-	mu             sync.Mutex
+	mu sync.Mutex
+	// DB is the live database pool used by the task service. Keeping the
+	// reference in the shared stand lets /metrics expose database/sql's real
+	// pool gauges instead of a synthetic counter.
+	DB             *sql.DB
 	startedAt      time.Time
 	requests       int64
 	errors         int64
@@ -135,6 +140,14 @@ func MetricsHandler(state *State, logFile string) http.HandlerFunc {
 		fmt.Fprintf(w, "# HELP app_requests_total requests served\n# TYPE app_requests_total counter\napp_requests_total %d\n", requests)
 		fmt.Fprintf(w, "# HELP app_errors_total requests that failed\n# TYPE app_errors_total counter\napp_errors_total %d\n", errors)
 		fmt.Fprintf(w, "# HELP app_db_queries_total database queries issued\n# TYPE app_db_queries_total counter\napp_db_queries_total %d\n", dbQueriesTotal)
+		poolInUse, poolMax := 0, 0
+		if state.DB != nil {
+			stats := state.DB.Stats()
+			poolInUse = stats.InUse
+			poolMax = stats.MaxOpenConnections
+		}
+		fmt.Fprintf(w, "# HELP app_db_pool_in_use database connections currently in use\n# TYPE app_db_pool_in_use gauge\napp_db_pool_in_use %d\n", poolInUse)
+		fmt.Fprintf(w, "# HELP app_db_pool_max database connection pool limit\n# TYPE app_db_pool_max gauge\napp_db_pool_max %d\n", poolMax)
 		fmt.Fprintf(w, "# HELP app_dep_calls_total dependency calls issued\n# TYPE app_dep_calls_total counter\napp_dep_calls_total %d\n", depCalls)
 		fmt.Fprintf(w, "# HELP app_cache_entries entries currently cached\n# TYPE app_cache_entries gauge\napp_cache_entries %d\n", cacheEntries)
 		fmt.Fprintf(w, "# HELP app_disk_pct simulated disk usage\n# TYPE app_disk_pct gauge\napp_disk_pct %.1f\n", diskPct)
