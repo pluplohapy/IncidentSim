@@ -88,3 +88,8 @@ spec:
       symptom: disk-full
       masked_artifact: "история логов, нужная для разбора"
       fails: log-history-preserved
+      apply:
+        kind: files
+        service: app
+        from: config/app.conf
+        to: config/app.conf

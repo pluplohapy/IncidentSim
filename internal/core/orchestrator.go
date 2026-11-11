@@ -655,6 +655,111 @@ func (o *Orchestrator) configArtifact(session *Session) (runtime.Artifact, error
 	return artifact, err
 }
 
+// ApplyDistractor applies a distractor's data-driven apply action to the
+// session, replacing the old switch-based applyDistractor. It returns the
+// check id the distractor masks (Fails) so the selfcheck can assert exactly
+// that check dropped to partial_fix.
+func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d *manifest.Distractor) (string, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return "", err
+	}
+	adapter, err := o.adapterFor(session)
+	if err != nil {
+		return "", err
+	}
+	if d.Apply == nil {
+		return d.Fails, fmt.Errorf("distractor %q has no apply action", d.ID)
+	}
+	switch d.Apply.Kind {
+	case "env":
+		_, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{
+			Service: d.Apply.Service, Vars: d.Apply.Vars, Restart: true,
+		})
+		if err != nil {
+			return d.Fails, fmt.Errorf("apply distractor env: %w", err)
+		}
+	case "files":
+		if d.Apply.From == "" || d.Apply.To == "" {
+			return d.Fails, fmt.Errorf("files distractor %q needs from and to", d.ID)
+		}
+		src := filepath.Join(o.Config.ProjectDir(), "scenarios", session.TaskID, "distractors", d.ID, d.Apply.From)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return d.Fails, fmt.Errorf("read distractor file %s: %w", src, err)
+		}
+		if session.WorkspaceDir == "" {
+			return d.Fails, fmt.Errorf("no workspace for session %s", session.ID)
+		}
+		dst := filepath.Join(session.WorkspaceDir, d.Apply.To)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return d.Fails, fmt.Errorf("create dir for %s: %w", d.Apply.To, err)
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			return d.Fails, fmt.Errorf("write %s: %w", d.Apply.To, err)
+		}
+		artifact, err := o.configArtifact(session)
+		if err != nil {
+			return d.Fails, fmt.Errorf("config artifact: %w", err)
+		}
+		if _, err := adapter.Deploy(ctx, session.ID, artifact, true); err != nil {
+			return d.Fails, fmt.Errorf("deploy distractor files: %w", err)
+		}
+	case "sql":
+		if session.manifest == nil {
+			return d.Fails, fmt.Errorf("no manifest for session %s", session.ID)
+		}
+		for _, stmt := range d.Apply.SQL {
+			if _, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+				Service: d.Apply.Service,
+				Command: sqlCommand(session.manifest, d.Apply.Service, stmt),
+			}); err != nil {
+				return d.Fails, fmt.Errorf("distractor sql %q: %w", stmt, err)
+			}
+		}
+	case "exec":
+		// from is the command to run.
+		if d.Apply.From == "" {
+			return d.Fails, fmt.Errorf("exec distractor %q needs from (command)", d.ID)
+		}
+		if _, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+			Service: d.Apply.Service,
+			Command: strings.Fields(d.Apply.From),
+		}); err != nil {
+			return d.Fails, fmt.Errorf("distractor exec %q: %w", d.Apply.From, err)
+		}
+	case "restart":
+		_, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{
+			Service: d.Apply.Service, Restart: true,
+		})
+		if err != nil {
+			return d.Fails, fmt.Errorf("restart distractor %q: %w", d.ID, err)
+		}
+	case "resources":
+		// Resource limits are applied at environment start; a runtime change
+		// is engine-specific. Record it as a no-op with a journal note.
+		session.journal.Record(EventFixApplied, "distractor resources (recorded only)", map[string]any{
+			"distractor": d.ID,
+			"limits":     d.Apply.Limits,
+		})
+	default:
+		return d.Fails, fmt.Errorf("unknown distractor apply kind %q", d.Apply.Kind)
+	}
+	session.mu.Lock()
+	session.AppliedFixes = append(session.AppliedFixes, runtime.EnvPatch{
+		Service: d.Apply.Service,
+		Vars:    d.Apply.Vars,
+	})
+	session.mu.Unlock()
+	session.journal.Record(EventFixApplied, "distractor applied", map[string]any{
+		"distractor":  d.ID,
+		"kind":        d.Apply.Kind,
+		"service":     d.Apply.Service,
+		"fails_check": d.Fails,
+	})
+	return d.Fails, nil
+}
+
 // journalWorkspaceDiff records a unified diff of the session workspace against
 // the scenario workspace, so the journal shows what changed rather than the
 // full contents of every file.

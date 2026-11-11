@@ -474,6 +474,19 @@ func (c *Client) GiveUp(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// Distractor applies a data-driven distractor action to the session and
+// returns the quality check it masks (fails).
+func (c *Client) Distractor(ctx context.Context, sessionID, distractorID string) (string, error) {
+	var response struct {
+		DistractorID string `json:"distractor"`
+		FailsCheck   string `json:"fails_check"`
+	}
+	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/distractor", map[string]string{"distractor_id": distractorID}, &response); err != nil {
+		return "", err
+	}
+	return response.FailsCheck, nil
+}
+
 // Diff prints the unified diff of the session workspace against the scenario.
 func (c *Client) Diff(ctx context.Context, sessionID string) error {
 	var response struct {

@@ -124,11 +124,19 @@ spec:
       symptom: errors-5xx
       masked_artifact: "размер пула соединений на стороне приложения"
       fails: pool-in-use-not-maxed
+      apply:
+        kind: env
+        service: app
+        vars:
+          POOL_MAX: "100"
     - id: restart-service
       title: "Перезапустить сервис app, чтобы освободить соединения"
       symptom: errors-5xx
       masked_artifact: "состояния пула соединений в памяти приложения"
       fails: idle-in-transaction-bounded
+      apply:
+        kind: restart
+        service: app
   replay:
     profile: workloads/db-connection-leak.yaml
     duration: 75s

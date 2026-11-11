@@ -48,67 +48,13 @@ func TestSplitSQLStatements(t *testing.T) {
 	}
 }
 
-func TestApplyDistractorCoversAllKnownKinds(t *testing.T) {
-	cases := []string{
-		"pool-in-use-not-maxed",
-		"idle-in-transaction-bounded",
-		"retry-loop-bounded",
-		"cache-back-on",
-		"log-history-preserved",
-		"data-preserved",
-		"autovacuum-enabled",
-		"connection-limit-restored",
-	}
-	for _, fails := range cases {
-		t.Run(fails, func(t *testing.T) {
-			d := struct {
-				ID    string `json:"id"`
-				Title string `json:"title"`
-				Fails string `json:"fails"`
-			}{ID: "d", Title: "d", Fails: fails}
-
-			var called bool
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				called = true
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"exit_code":0,"stdout":"","stderr":""}`))
-			}))
-			defer server.Close()
-
-			setenv("INCIDENTSIM_ADDR", server.URL)
-			err := applyDistractor(cli.New(server.URL), context.Background(), "session-1", d, "config")
-			if err != nil && strings.Contains(err.Error(), "unknown distractor") {
-				t.Fatalf("kind %q is not covered: %v", fails, err)
-			}
-			if !called {
-				t.Fatalf("kind %q did not reach the API", fails)
-			}
-		})
-	}
-}
-
-// TestCatalogDistractorsAreUniqueAndCovered keeps the distractor contract of
-// the catalog honest. Two distractors that share a fails value are a task bug:
-// they would apply the same action and be graded by the same check, so the
-// quality gate would prove nothing about one of them.
-func TestCatalogDistractorsAreUniqueAndCovered(t *testing.T) {
+func TestCatalogDistractorsHaveApplyAndUniqueFails(t *testing.T) {
 	catalog, err := core.NewCatalog(filepath.Join("..", "..", "manifests"))
 	if err != nil {
 		t.Fatalf("load catalog: %v", err)
 	}
-	// Mirrors the branches of applyDistractor: a distractor without a branch
-	// cannot be applied by selfcheck at all.
-	covered := map[string]bool{
-		"pool-in-use-not-maxed":       true,
-		"idle-in-transaction-bounded": true,
-		"retry-loop-bounded":          true,
-		"cache-back-on":               true,
-		"log-history-preserved":       true,
-		"data-preserved":              true,
-		"autovacuum-enabled":          true,
-		"connection-limit-restored":   true,
-	}
+	// Every distractor must have an apply action (data-driven, B10) and a
+	// unique fails value within the task.
 	for _, id := range catalog.IDs() {
 		task, err := catalog.Load(id)
 		if err != nil {
@@ -123,8 +69,8 @@ func TestCatalogDistractorsAreUniqueAndCovered(t *testing.T) {
 			if !qualityIDs[d.Fails] {
 				t.Errorf("%s: distractor %s is graded by %q, which is not a quality check of the task", id, d.ID, d.Fails)
 			}
-			if !covered[d.Fails] {
-				t.Errorf("%s: distractor %s has no branch in applyDistractor (%q)", id, d.ID, d.Fails)
+			if d.Apply == nil {
+				t.Errorf("%s: distractor %s has no apply action (B10: distractors[].apply is required)", id, d.ID)
 			}
 			if other, dup := byFails[d.Fails]; dup {
 				t.Errorf("%s: distractors %s and %s both fail %q: they would apply the same action", id, other, d.ID, d.Fails)

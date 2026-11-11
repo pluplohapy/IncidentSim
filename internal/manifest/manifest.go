@@ -229,9 +229,28 @@ type ReplaySpec struct {
 // Distractor describes an action that hides the symptom without removing the
 // root cause. It is what makes the quality gate meaningful.
 type Distractor struct {
-	ID             string `yaml:"id" json:"id"`
-	Title          string `yaml:"title" json:"title"`
-	Symptom        string `yaml:"symptom" json:"symptom"`
-	MaskedArtifact string `yaml:"masked_artifact" json:"masked_artifact"`
-	Fails          string `yaml:"fails" json:"fails"`
+	ID             string           `yaml:"id" json:"id"`
+	Title          string           `yaml:"title" json:"title"`
+	Symptom        string           `yaml:"symptom" json:"symptom"`
+	MaskedArtifact string           `yaml:"masked_artifact" json:"masked_artifact"`
+	Fails          string           `yaml:"fails" json:"fails"`
+	Apply          *DistractorApply `yaml:"apply,omitempty" json:"apply,omitempty"`
+}
+
+// DistractorApply is the data-driven action a distractor performs, replacing
+// the old switch-based applyDistractor in cmd/incidentsim.
+type DistractorApply struct {
+	// Kind is one of env|files|sql|exec|restart|resources.
+	Kind    string            `yaml:"kind" json:"kind"`
+	Service string            `yaml:"service,omitempty" json:"service,omitempty"`
+	Vars    map[string]string `yaml:"vars,omitempty" json:"vars,omitempty"`
+	// From is a directory under scenarios/<id>/distractors/<did>/ whose files
+	// are copied to `to` in the workspace.
+	From string `yaml:"from,omitempty" json:"from,omitempty"`
+	// To is the destination file in the workspace (for kind=files).
+	To string `yaml:"to,omitempty" json:"to,omitempty"`
+	// SQL statements to run (for kind=sql).
+	SQL []string `yaml:"sql,omitempty" json:"sql,omitempty"`
+	// Limits are resource limits (for kind=resources).
+	Limits map[string]string `yaml:"limits,omitempty" json:"limits,omitempty"`
 }

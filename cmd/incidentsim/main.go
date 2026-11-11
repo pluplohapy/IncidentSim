@@ -829,6 +829,15 @@ type taskDetail struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 		Fails string `json:"fails"`
+		Apply struct {
+			Kind    string            `json:"kind,omitempty"`
+			Service string            `json:"service,omitempty"`
+			Vars    map[string]string `json:"vars,omitempty"`
+			From    string            `json:"from,omitempty"`
+			To      string            `json:"to,omitempty"`
+			SQL     []string          `json:"sql,omitempty"`
+			Limits  map[string]string `json:"limits,omitempty"`
+		} `json:"apply,omitempty"`
 	} `json:"distractors,omitempty"`
 }
 
@@ -847,6 +856,20 @@ func readTaskDetail(api *cli.Client, taskID string) (taskDetail, error) {
 	var task taskDetail
 	if err := api.Get(context.Background(), "/api/v1/tasks/"+taskID, &task); err != nil {
 		return task, fmt.Errorf("read task %q: %w", taskID, err)
+	}
+	if task.Level == "" {
+		return task, fmt.Errorf("task %q declares no level", task.ID)
+	}
+	return task, nil
+}
+
+// readAdminTaskDetail reads the full (private) task detail from the admin
+// endpoint, including distractors, root_cause, theory and reference_solution.
+// Requires INCIDENTSIM_ADMIN=1.
+func readAdminTaskDetail(api *cli.Client, taskID string) (taskDetail, error) {
+	var task taskDetail
+	if err := api.Get(context.Background(), "/api/v1/admin/tasks/"+taskID, &task); err != nil {
+		return task, fmt.Errorf("read admin task %q: %w", taskID, err)
 	}
 	if task.Level == "" {
 		return task, fmt.Errorf("task %q declares no level", task.ID)
@@ -874,7 +897,17 @@ func selfcheck(ctx context.Context, api *cli.Client, taskID string) error {
 		return fmt.Errorf("task %q is not in the catalog", taskID)
 	}
 
-	task, err := readTaskDetail(api, taskID)
+	// B4/B11: distractors are not in the public view. Read the full task
+	// (including distractors and reference) from the admin endpoint when
+	// INCIDENTSIM_ADMIN=1; otherwise selfcheck cannot test distractors.
+	admin := os.Getenv("INCIDENTSIM_ADMIN") == "1"
+	var task taskDetail
+	var err error
+	if admin {
+		task, err = readAdminTaskDetail(api, taskID)
+	} else {
+		task, err = readTaskDetail(api, taskID)
+	}
 	if err != nil {
 		return err
 	}
@@ -914,8 +947,12 @@ func selfcheck(ctx context.Context, api *cli.Client, taskID string) error {
 
 	for _, d := range task.Distractors {
 		fmt.Printf("  distractor %s: %s\n", d.ID, d.Title)
-		if err := applyDistractor(api, ctx, sessionID, d, task.Level); err != nil {
+		failsCheck, err := api.Distractor(ctx, sessionID, d.ID)
+		if err != nil {
 			return fmt.Errorf("apply distractor %s: %w", d.ID, err)
+		}
+		if failsCheck != d.Fails {
+			return fmt.Errorf("distractor %s fails check %q, want %q", d.ID, failsCheck, d.Fails)
 		}
 		if err := verifyExpect(api, sessionID, verifier.VerdictPartial); err != nil {
 			return fmt.Errorf("verify distractor %s: %w", d.ID, err)
@@ -923,7 +960,7 @@ func selfcheck(ctx context.Context, api *cli.Client, taskID string) error {
 		if err := api.Reset(ctx, sessionID); err != nil {
 			return fmt.Errorf("reset after distractor %s: %w", d.ID, err)
 		}
-		fmt.Printf("  distractor %s: PASS (partial_fix)\n", d.ID)
+		fmt.Printf("  distractor %s: PASS (partial_fix, fails %s)\n", d.ID, failsCheck)
 	}
 
 	fmt.Printf("=== selfcheck %s: ALL PASS ===\n", taskID)
@@ -1000,40 +1037,6 @@ func verifyExpect(api *cli.Client, sessionID, want string) error {
 		return fmt.Errorf("verdict = %s, want %s\n%s", report.Verdict, want, report.String())
 	}
 	return nil
-}
-
-// applyDistractor applies a distractor fix based on its fails check.
-func applyDistractor(api *cli.Client, ctx context.Context, sessionID string, d struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Fails string `json:"fails"`
-}, level string) error {
-	service := "app"
-	switch d.Fails {
-	case "pool-in-use-not-maxed":
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{"POOL_MAX": "100"}, nil, true)
-	case "idle-in-transaction-bounded":
-		return api.Apply(ctx, sessionID, service,
-			map[string]string{}, nil, true)
-	case "retry-loop-bounded":
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{"RETRY_ENABLED": "false"}, nil, true)
-	case "cache-back-on":
-		return api.Apply(context.Background(), sessionID, service,
-			map[string]string{}, nil, true)
-	case "log-history-preserved":
-		return api.Apply(ctx, sessionID, "app", nil,
-			map[string]string{"config/app.conf": "LOG_LEVEL=debug\nLOG_FILE=/dev/null\n"}, true)
-	case "data-preserved":
-		return api.ExecSQL(ctx, sessionID, "db", "TRUNCATE orders")
-	case "autovacuum-enabled":
-		return api.ExecSQL(ctx, sessionID, "db", "ALTER TABLE orders SET (autovacuum_enabled = false)")
-	case "connection-limit-restored":
-		return api.ExecSQL(ctx, sessionID, "db", "ALTER ROLE postgres CONNECTION LIMIT 10")
-	default:
-		return fmt.Errorf("unknown distractor fails check %q", d.Fails)
-	}
 }
 
 // ReportExecResult prints what the command produced and turns a non-zero exit

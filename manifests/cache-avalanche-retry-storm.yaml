@@ -148,11 +148,19 @@ spec:
       symptom: errors-5xx
       masked_artifact: "устойчивость к транзиентным сбоям"
       fails: retry-loop-bounded
+      apply:
+        kind: env
+        service: app
+        vars:
+          RETRY_ENABLED: "false"
     - id: restart-app
       title: "Перезапустить app — метрики сбросятся"
       symptom: errors-5xx
       masked_artifact: "причина: env восстанавливается из рестарта"
       fails: cache-back-on
+      apply:
+        kind: restart
+        service: app
   theory: |
     Avalanche: кэш отключён, и каждый запрос пошёл в БД. Ретраи без backoff
     превращают замедление в лавину: один упавший запрос порождает 20 попыток,

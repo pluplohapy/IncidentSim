@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"incidentsim/internal/manifest"
 	"incidentsim/internal/runtime"
 )
 
@@ -203,6 +204,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.handleStop(w, r, session)
 	case "give-up":
 		s.handleGiveUp(w, r, session)
+	case "distractor":
+		s.handleDistractor(w, r, session)
 	default:
 		writeError(w, http.StatusNotFound, "unknown action "+action, "")
 	}
@@ -428,6 +431,42 @@ func (s *Server) handleGiveUp(w http.ResponseWriter, r *http.Request, session *S
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"gave_up": true})
+}
+
+func (s *Server) handleDistractor(w http.ResponseWriter, r *http.Request, session *Session) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	var body struct {
+		DistractorID string `json:"distractor_id"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
+		return
+	}
+	if body.DistractorID == "" {
+		writeError(w, http.StatusBadRequest, "distractor_id is required", "")
+		return
+	}
+	task := session.manifest
+	var d *manifest.Distractor
+	for i := range task.Spec.Distractors {
+		if task.Spec.Distractors[i].ID == body.DistractorID {
+			d = &task.Spec.Distractors[i]
+			break
+		}
+	}
+	if d == nil {
+		writeError(w, http.StatusNotFound, "distractor not found", body.DistractorID)
+		return
+	}
+	failsCheck, err := s.Orchestrator.ApplyDistractor(r.Context(), session.ID, d)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"distractor": body.DistractorID, "fails_check": failsCheck})
 }
 
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request, session *Session) {

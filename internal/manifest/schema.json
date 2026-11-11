@@ -164,7 +164,7 @@
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
-        "type": { "enum": ["http", "metric", "sql", "log", "policy", "exec"] },
+        "type": { "enum": ["http", "metric", "sql", "log", "policy", "exec", "replay", "unit"] },
         "title": { "type": "string" },
         "service": { "type": "string" },
         "path": { "type": "string", "pattern": "^/" },
@@ -181,7 +181,11 @@
           "type": "string",
           "pattern": "^/",
           "description": "Configuration file inside the container a policy check reads. Declaring it makes the check read the file the service loads at startup instead of the process environment."
-        }
+        },
+        "agg": { "enum": ["max", "min", "avg", "last", "p95", "slope", "delta", "resets"] },
+        "window": { "$ref": "#/$defs/window" },
+        "absent": { "type": "boolean" },
+        "field": { "type": "string" }
       },
       "allOf": [
         {
@@ -207,8 +211,24 @@
         {
           "if": { "properties": { "type": { "const": "exec" } }, "required": ["type"] },
           "then": { "required": ["command"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "replay" } }, "required": ["type"] },
+          "then": { "required": ["field"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "unit" } }, "required": ["type"] },
+          "then": { "required": [] }
         }
       ]
+    },
+
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" }
+      }
     },
 
     "expectation": {
@@ -271,9 +291,47 @@
           "title": { "type": "string" },
           "symptom": { "type": "string", "description": "Symptom id the distractor hides." },
           "masked_artifact": { "type": "string", "description": "What the distractor destroys or hides." },
-          "fails": { "type": "string", "description": "Quality check id that catches the distractor." }
+          "fails": { "type": "string", "description": "Quality check id that catches the distractor." },
+          "apply": { "$ref": "#/$defs/distractorApply" }
         }
       }
+    },
+
+    "distractorApply": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["env", "files", "sql", "exec", "restart", "resources"] },
+        "service": { "type": "string" },
+        "vars": { "type": "object", "additionalProperties": { "type": "string" } },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "sql": { "type": "array", "items": { "type": "string" } },
+        "limits": { "type": "object", "additionalProperties": { "type": "string" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "env" } }, "required": ["kind"] },
+          "then": { "required": ["service", "vars"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "files" } }, "required": ["kind"] },
+          "then": { "required": ["from", "to"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "sql" } }, "required": ["kind"] },
+          "then": { "required": ["service", "sql"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "exec" } }, "required": ["kind"] },
+          "then": { "required": ["from"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "restart" } }, "required": ["kind"] },
+          "then": { "required": ["service"] }
+        }
+      ]
     }
   }
 }

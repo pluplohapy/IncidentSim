@@ -116,6 +116,11 @@ spec:
       symptom: slow-orders
       masked_artifact: "все заказы клиентов"
       fails: data-preserved
+      apply:
+        kind: sql
+        service: db
+        sql:
+          - "TRUNCATE orders"
   theory: |
     Bloat — это мёртвые кортежи, которые занимают место и замедляют seq scan.
     Автовакуум обычно убирает их сам, поэтому «выключить autovacuum, чтобы
