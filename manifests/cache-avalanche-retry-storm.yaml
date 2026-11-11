@@ -138,7 +138,7 @@ spec:
       - "Вернуть RETRY_BACKOFF_MS >= 20 и RETRY_ATTEMPTS <= 5"
       - "Вернуть лимит соединений роли (ALTER ROLE postgres CONNECTION LIMIT -1)"
     commands:
-      - "incidentsim apply --service app --file config/app.conf --content <новое содержимое>"
+      - "incidentsim edit <session> config/app.conf && incidentsim apply <session>"
       - "incidentsim apply --service app --set CACHE_ENABLED=true --set RETRY_BACKOFF_MS=50 --set RETRY_ATTEMPTS=5"
       - "incidentsim apply --service db --sql \"ALTER ROLE postgres CONNECTION LIMIT -1\""
     rollback: "Если нагрузка упадёт ещё сильнее, проверьте, что кэш прогрет: холодный старт даёт тот же эффект"

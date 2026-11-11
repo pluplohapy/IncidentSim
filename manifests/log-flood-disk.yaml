@@ -74,7 +74,7 @@ spec:
       - "Проверить уровень логирования"
       - "Выставить LOG_LEVEL=info в config/app.conf и перезапустить сервис"
     commands:
-      - "incidentsim apply --service app --file config/app.conf --content <новое содержимое>"
+      - "incidentsim edit <session> config/app.conf && incidentsim apply <session>"
     rollback: "incidentsim reset <session>"
   distractors:
     - id: delete-log-file

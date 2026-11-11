@@ -22,44 +22,112 @@ apiVersion: incidentsim/v1
 kind: Incident
 metadata:
   id: $id
-  title: "TODO: title"
-  difficulty: intermediate
+  title: "Новая code-задача: $id"
+  level: code
+  tags: [go, postgres]
+  estimated_minutes: 30
 spec:
-  level: config
-  engine: compose
   workspace: scenarios/$id/workspace
   reference: scenarios/$id/reference
-  editable:
-    - config/app.conf
+  runtime:
+    engine: compose
+    memory_mib: 1024
+  services:
+    - name: db
+      image: postgres:16-alpine
+      env:
+        POSTGRES_PASSWORD: incidentsim
+        POSTGRES_DB: orders
+    - name: app
+      image: incidentsim/workload:dev
+      env:
+        DB_HOST: db
+        DB_PORT: "5432"
+        DB_NAME: orders
+        DB_USER: postgres
+        DB_PASSWORD: incidentsim
+      ports: [8080]
+      healthcheck:
+        path: /healthz
+        port: 8080
+        interval_seconds: 5
+        timeout_seconds: 2
+  editable: [app/handler.go]
   symptoms:
     - id: symptom
-      description: "TODO: observable symptom"
-  root_cause:
-    summary: "TODO: root cause"
-    clues: []
+      observation: "TODO: observable symptom"
+  hints:
+    - level: 1
+      text: "TODO: first diagnostic clue"
+    - level: 2
+      text: "TODO: second diagnostic clue"
+    - level: 3
+      text: "TODO: root-cause direction"
+  fault:
+    type: sql_config
+    target: db
+    trigger: on_start
+    options:
+      statements: ["CREATE TABLE IF NOT EXISTS orders (id serial primary key)"]
   verify:
     correctness:
-      - id: correctness
-        description: "TODO: service recovers"
-        command: "true"
+      - id: healthz-200
+        type: http
+        service: app
+        path: /healthz
+        expect:
+          status: 200
     quality:
-      - id: quality
-        description: "TODO: root cause is fixed"
-        command: "true"
+      - id: artifact-check
+        type: exec
+        service: app
+        command: ["sh", "-c", "true"]
+        reason: "TODO: prove the root cause is fixed in the artifact"
+      - id: behavior-check
+        type: replay
+        field: error_rate
+        expect:
+          max: 0.005
+        reason: "TODO: prove the behavior remains healthy under load"
+  root_cause:
+    summary: "TODO: root cause"
+    layer: code
   distractors:
-    - id: distractor
-      title: "TODO: symptom-only workaround"
+    - id: bigger-pool
+      title: "Увеличить лимит пула"
       symptom: symptom
       masked_artifact: "TODO: what remains broken"
-      fails: quality
+      fails: artifact-check
       apply:
         kind: env
         service: app
         vars:
-          TODO: "replace-me"
+          POOL_MAX: "100"
+  replay:
+    profile: workloads/$id.yaml
+    duration: 10s
+    rps: 10
   reference_solution:
     summary: "TODO: safe production fix"
     steps: []
 EOF
+
+# Fill the workspace with the shared, non-editable stand files. The generated
+# handler remains the only participant-owned Go file.
+"$root/scripts/sync-stand.sh" "$id"
+cat > "$root/scenarios/$id/workspace/Dockerfile" <<'EOF'
+FROM golang:1.24-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY app/ ./app/
+RUN CGO_ENABLED=0 go build -o /app ./app/
+FROM alpine:3.20
+COPY --from=builder /app /app
+EXPOSE 8080
+ENTRYPOINT ["/app"]
+EOF
+mkdir -p "$root/scenarios/$id/reference/app"
+cp "$root/scenarios/$id/workspace/app/handler.go" "$root/scenarios/$id/reference/app/handler.go"
 echo "created manifests/$id.yaml and scenarios/$id/{workspace,reference}"
-echo "fill every TODO, add a real service, then run: go run ./cmd/incidentsim validate manifests"
+echo "replace TODO values, add workloads/$id.yaml, then run: go run ./cmd/incidentsim validate manifests"

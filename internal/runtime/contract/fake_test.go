@@ -6,10 +6,10 @@ import (
 	"incidentsim/internal/runtime"
 )
 
-// TestFakeAdapterContract runs the contract suite against the in-memory fake
-// adapter. It requires neither Docker nor KVM and must pass on every machine.
+// The in-memory adapter is always covered. Real Compose and Firecracker runs
+// are opt-in because they need Docker or a provisioned Linux/KVM host.
 func TestFakeAdapterContract(t *testing.T) {
 	Run(t, func(t *testing.T) (runtime.Adapter, func()) {
-		return runtime.NewFake("compose"), func() {}
-	}, "fake-compose")
+		return runtime.NewFake("fake"), func() {}
+	}, "fake")
 }

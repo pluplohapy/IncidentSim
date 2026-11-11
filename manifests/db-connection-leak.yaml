@@ -116,11 +116,11 @@ spec:
     steps:
       - "Открыть scenarios/db-connection-leak/workspace/app/handler.go (или сессионный workspace)"
       - "Добавить defer tx.Rollback() после db.Begin(), затем defer rows.Close() и rows.Err() после цикла обхода"
-      - "incidentsim apply <session> --service app --file app/handler.go --content <новое содержимое handler.go>"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
       - "Повторить incidentsim verify <session>"
     rollback: "incidentsim reset <session>"
     commands:
-      - "incidentsim apply <session> --service app --file app/handler.go --content '<reference code>'"
+      - "incidentsim edit <session> app/handler.go && incidentsim apply <session>"
       - "incidentsim verify <session>"
   distractors:
     - id: bigger-pool
