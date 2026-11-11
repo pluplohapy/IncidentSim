@@ -43,6 +43,7 @@ const (
 	CheckLog    = "log"
 	CheckPolicy = "policy"
 	CheckExec   = "exec"
+	CheckReplay = "replay"
 )
 
 // Trigger values for fault activation.
@@ -171,6 +172,23 @@ type Check struct {
 	// environment, which is what keeps the "fix is visible to the check"
 	// invariant honest when the fix is a config edit.
 	File string `yaml:"file,omitempty" json:"file,omitempty"`
+	// Agg is the aggregate function for metric checks over a sampled series:
+	// max|min|avg|last|p95|slope|delta|resets. When set, the check reads from
+	// the replay sampler instead of a single scrape.
+	Agg string `yaml:"agg,omitempty" json:"agg,omitempty"`
+	// Window is the observation slice for metric/replay checks. From skips the
+	// warmup (e.g. "5s").
+	Window *Window `yaml:"window,omitempty" json:"window,omitempty"`
+	// Absent is for log checks: when true, the check passes when NO line
+	// matches Pattern (e.g. no secrets in logs).
+	Absent bool `yaml:"absent,omitempty" json:"absent,omitempty"`
+	// Field is for replay checks: error_rate|success_rate|p99_ms|rps|errors_reset.
+	Field string `yaml:"field,omitempty" json:"field,omitempty"`
+}
+
+// Window is the observation slice of a replay. From skips the warmup.
+type Window struct {
+	From string `yaml:"from,omitempty" json:"from,omitempty"` // e.g. "5s"
 }
 
 // Expectation is the pass condition of a check.

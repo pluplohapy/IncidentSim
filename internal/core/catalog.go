@@ -160,9 +160,20 @@ func projectChecks(checks []manifest.Check, gate verifier.Gate) []verifier.Check
 			Expect:   projectExpectation(check.Expect),
 			Reason:   check.Reason,
 			File:     check.File,
+			Agg:      check.Agg,
+			Window:   projectWindow(check.Window),
+			Absent:   check.Absent,
+			Field:    check.Field,
 		})
 	}
 	return out
+}
+
+func projectWindow(w *manifest.Window) *verifier.Window {
+	if w == nil {
+		return nil
+	}
+	return &verifier.Window{From: w.From}
 }
 
 func projectExpectation(expect *manifest.Expectation) *verifier.Expectation {

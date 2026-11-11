@@ -18,12 +18,19 @@ import (
 // It is the default grader and the reason the whole system exists: every check
 // is data, so a task author controls exactly what "fixed" means without
 // touching Go code.
+//
+// B6: Verify order is baseline reset -> correctness (point checks) ->
+// replay+sampler (one replay, sampler scrapes /metrics every second) ->
+// quality (aggregates from the sampler series). A single verify stays under 45 s.
 type ManifestVerifier struct {
 	// HTTPTimeout bounds every http check.
 	HTTPTimeout time.Duration
 	// ReplayRunner replays load before the correctness checks run. It is a
 	// field so a test can substitute a runner with a controlled clock.
 	ReplayRunner *ReplayRunner
+	// Sampler scrapes /metrics during the replay. When nil a default sampler
+	// is used.
+	Sampler *Sampler
 	// ProjectDir is the repository root the profiles are relative to, so a
 	// manifest writes workloads/db-connection-leak.yaml exactly as the path
 	// looks on disk. A task whose profile cannot be loaded fails loudly.
@@ -35,6 +42,7 @@ func NewManifestVerifier() *ManifestVerifier {
 	return &ManifestVerifier{
 		HTTPTimeout:  15 * time.Second,
 		ReplayRunner: &ReplayRunner{Now: time.Now},
+		Sampler:      NewSampler(),
 	}
 }
 
@@ -47,9 +55,10 @@ func NewManifestVerifier() *ManifestVerifier {
 //   - correctness runs before the load: it answers "does the system
 //     answer at all", which is a property of the current state and not of
 //     the replay;
-//   - the replay starts before the quality gate and runs for as long as
-//     the quality checks measure, because a quality check that grades an
-//     idle system would let a task be "fixed" by stopping the service.
+//   - the replay runs once while the sampler scrapes /metrics every second
+//     into time series;
+//   - the quality gate measures aggregates from the sampler series (and the
+//     replay result), never an idle system.
 func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionID, taskID string, checks CheckSet) (Report, error) {
 	report := NewReport(sessionID, taskID)
 	if env == nil {
@@ -60,28 +69,33 @@ func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionI
 	// this one measures.
 	v.resetBaseline(ctx, env)
 
-	// Correctness first: a point check of the current state.
+	// Correctness first: point checks of the current state.
 	report.Correctness.Results = v.runGate(ctx, env, checks.Correctness)
 
-	// The observation window starts now and the quality gate measures
-	// inside it. A gate that measures an idle system would let a task be
-	// "fixed" by stopping the service.
-	replayCtx, cancelReplay := context.WithCancel(ctx)
-	replayDone := make(chan string, 1)
-	go func() {
-		replayDone <- v.runReplay(replayCtx, env, checks)
-	}()
-	select {
-	case <-ctx.Done():
-		cancelReplay()
-		<-replayDone
-		return report, ctx.Err()
-	case <-time.After(500 * time.Millisecond):
+	// One replay while the sampler scrapes /metrics every second. The sampler
+	// is started before the replay and stopped after, so the series covers the
+	// whole observation window. A fresh sampler is used per Verify run so the
+	// series is never polluted by a previous run.
+	sampler := NewSampler()
+	instance := env.Instance()
+	target := ""
+	if instance != nil {
+		target = replayTarget(instance, checks)
 	}
-
-	report.Quality.Results = v.runGate(ctx, env, checks.Quality)
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	if target != "" {
+		go sampler.Start(replayCtx, target, checks.ReplayTargetService())
+	}
+	replayResult := v.runReplay(replayCtx, env, checks)
+	if target != "" {
+		sampler.Stop()
+	}
 	cancelReplay()
-	report.Replay = <-replayDone
+
+	// Quality gate measures aggregates from the sampler series (and the
+	// replay result).
+	report.Quality.Results = v.runQualityGate(ctx, env, checks.Quality, sampler, replayResult)
+	report.Replay = replayResult.String()
 	report.Finalise()
 	return report, nil
 }
@@ -120,28 +134,28 @@ func (v *ManifestVerifier) resetBaseline(ctx context.Context, env Environment) {
 // The replay targets the service the correctness checks measure. Picking the
 // first service of the environment instead would replay against a database,
 // which speaks no HTTP and reports a thousand meaningless errors.
-func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, checks CheckSet) string {
+func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, checks CheckSet) ReplayResult {
 	config := checks.Replay
 	if config == nil || config.Duration == "" {
-		return ""
+		return ReplayResult{}
 	}
 	instance := env.Instance()
 	if instance == nil {
-		return "replay skipped: no environment"
+		return ReplayResult{}
 	}
 	requests, err := v.profileRequests(config)
 	if err != nil {
-		return fmt.Sprintf("replay skipped: %v", err)
+		return ReplayResult{}
 	}
 	target := replayTarget(instance, checks)
 	if target == "" {
-		return "replay skipped: no HTTP service in the environment"
+		return ReplayResult{}
 	}
 	result, err := v.ReplayRunner.Replay(ctx, target, requests, *config)
 	if err != nil {
-		return fmt.Sprintf("replay incomplete: %v", err)
+		return ReplayResult{}
 	}
-	return result.String()
+	return result
 }
 
 // replayTarget resolves the endpoint the replay should load.
@@ -188,6 +202,49 @@ func (v *ManifestVerifier) profileRequests(config *ReplayConfig) ([]Request, err
 	return profile.Requests, nil
 }
 
+// runQualityGate executes every quality check, using the sampler series for
+// metric-with-agg checks and the replay result for replay checks.
+func (v *ManifestVerifier) runQualityGate(ctx context.Context, env Environment, checks []Check, sampler *Sampler, replayResult ReplayResult) []Result {
+	results := make([]Result, 0, len(checks))
+	for _, check := range checks {
+		results = append(results, v.runQualityCheck(ctx, env, check, sampler, replayResult))
+	}
+	return results
+}
+
+func (v *ManifestVerifier) runQualityCheck(ctx context.Context, env Environment, check Check, sampler *Sampler, replayResult ReplayResult) Result {
+	start := time.Now()
+	result := Result{Check: check}
+	if env == nil {
+		result.Passed = false
+		result.Detail = "unable to probe the environment: no environment given"
+		result.Duration = time.Since(start).Round(time.Millisecond).String()
+		return result
+	}
+
+	switch check.Kind {
+	case CheckHTTP:
+		result = v.checkHTTP(ctx, env, check)
+	case CheckMetric:
+		result = v.checkMetric(ctx, env, check, sampler)
+	case CheckLog:
+		result = v.checkLog(ctx, env, check)
+	case CheckExec:
+		result = v.checkExec(ctx, env, check)
+	case CheckSQL:
+		result = v.checkSQL(ctx, env, check)
+	case CheckPolicy:
+		result = v.checkPolicy(ctx, env, check)
+	case CheckReplay:
+		result = v.checkReplay(ctx, env, check, replayResult)
+	default:
+		result.Passed = false
+		result.Detail = fmt.Sprintf("unknown check kind %q", check.Kind)
+	}
+	result.Duration = time.Since(start).Round(time.Millisecond).String()
+	return result
+}
+
 // runGate executes every check of one gate and never stops early: a report
 // must show all failures, because the first failing check is rarely the only
 // thing that is wrong with a fix.
@@ -215,7 +272,7 @@ func (v *ManifestVerifier) runCheck(ctx context.Context, env Environment, check 
 	case CheckHTTP:
 		result = v.checkHTTP(ctx, env, check)
 	case CheckMetric:
-		result = v.checkMetric(ctx, env, check)
+		result = v.checkMetric(ctx, env, check, nil)
 	case CheckLog:
 		result = v.checkLog(ctx, env, check)
 	case CheckExec:
@@ -280,11 +337,41 @@ func (v *ManifestVerifier) checkHTTP(ctx context.Context, env Environment, check
 	return result
 }
 
-func (v *ManifestVerifier) checkMetric(ctx context.Context, env Environment, check Check) Result {
+func (v *ManifestVerifier) checkMetric(ctx context.Context, env Environment, check Check, sampler *Sampler) Result {
 	result := Result{Check: check}
 
-	if check.Duration != "" {
-		return v.checkMetricWindow(ctx, env, check)
+	// When Agg is set, read from the sampler series collected during the
+	// replay. This replaces the old checkMetricWindow which scraped for the
+	// whole duration and always took max.
+	if check.Agg != "" {
+		if sampler == nil {
+			return fail(result, "metric check with agg requires a sampler")
+		}
+		window := Window{}
+		if check.Window != nil {
+			window = *check.Window
+		}
+		value, ok, err := sampler.Aggregate(check.Query, Agg(check.Agg), window)
+		if err != nil {
+			return fail(result, fmt.Sprintf("metric aggregate: %v", err))
+		}
+		if !ok {
+			return fail(result, fmt.Sprintf("metric %q not found in sampler series", check.Query))
+		}
+		result.Evidence = fmt.Sprintf("%s %s = %v", check.Query, check.Agg, value)
+
+		if check.Expect == nil {
+			return fail(result, "metric check requires expect.min or expect.max")
+		}
+		if check.Expect.Min != nil && value < *check.Expect.Min {
+			return fail(result, fmt.Sprintf("%s %s = %v, want >= %v", check.Query, check.Agg, value, *check.Expect.Min))
+		}
+		if check.Expect.Max != nil && value > *check.Expect.Max {
+			return fail(result, fmt.Sprintf("%s %s = %v, want <= %v", check.Query, check.Agg, value, *check.Expect.Max))
+		}
+		result.Passed = true
+		result.Detail = fmt.Sprintf("%s %s = %v within bounds", check.Query, check.Agg, value)
+		return result
 	}
 
 	samples, err := env.Runtime().Metrics(ctx, env.InstanceID(), check.Service)
@@ -319,64 +406,6 @@ func (v *ManifestVerifier) checkMetric(ctx context.Context, env Environment, che
 	return result
 }
 
-func (v *ManifestVerifier) checkMetricWindow(ctx context.Context, env Environment, check Check) Result {
-	result := Result{Check: check}
-
-	duration, err := time.ParseDuration(check.Duration)
-	if err != nil {
-		return fail(result, fmt.Sprintf("invalid duration %q: %v", check.Duration, err))
-	}
-	if duration <= 0 {
-		return fail(result, fmt.Sprintf("duration must be positive, got %q", check.Duration))
-	}
-
-	interval := 2 * time.Second
-	deadline := time.Now().Add(duration)
-	var best *runtime.MetricSample
-
-	for {
-		samples, err := env.Runtime().Metrics(ctx, env.InstanceID(), check.Service)
-		if err != nil {
-			return fail(result, fmt.Sprintf("read metrics: %v", err))
-		}
-		for i := range samples {
-			if samples[i].Name != check.Query {
-				continue
-			}
-			if best == nil || samples[i].Value > best.Value {
-				best = &samples[i]
-			}
-		}
-
-		if time.Now().After(deadline) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return fail(result, "context cancelled")
-		case <-time.After(interval):
-		}
-	}
-
-	if best == nil {
-		return fail(result, fmt.Sprintf("metric %q not found on service %q", check.Query, check.Service))
-	}
-	result.Evidence = fmt.Sprintf("%s max = %v over %s", best.Name, best.Value, duration)
-
-	if check.Expect == nil {
-		return fail(result, "metric check requires expect.min or expect.max")
-	}
-	if check.Expect.Min != nil && best.Value < *check.Expect.Min {
-		return fail(result, fmt.Sprintf("%s max = %v, want >= %v", best.Name, best.Value, *check.Expect.Min))
-	}
-	if check.Expect.Max != nil && best.Value > *check.Expect.Max {
-		return fail(result, fmt.Sprintf("%s max = %v, want <= %v", best.Name, best.Value, *check.Expect.Max))
-	}
-	result.Passed = true
-	result.Detail = fmt.Sprintf("%s max = %v within bounds", best.Name, best.Value)
-	return result
-}
-
 func (v *ManifestVerifier) checkLog(ctx context.Context, env Environment, check Check) Result {
 	result := Result{Check: check}
 	lines, err := env.Runtime().Logs(ctx, env.InstanceID(), runtime.LogOptions{
@@ -388,6 +417,16 @@ func (v *ManifestVerifier) checkLog(ctx context.Context, env Environment, check 
 		return fail(result, fmt.Sprintf("read logs: %v", err))
 	}
 	result.Evidence = fmt.Sprintf("%d matching lines", len(lines))
+	if check.Absent {
+		// Log absent: the check passes when NO line matches the pattern
+		// (e.g. no secrets in logs).
+		if len(lines) > 0 {
+			return fail(result, fmt.Sprintf("found %d lines matching %q, expected none", len(lines), check.Pattern))
+		}
+		result.Passed = true
+		result.Detail = fmt.Sprintf("no lines match %q (absent)", check.Pattern)
+		return result
+	}
 	if len(lines) == 0 {
 		return fail(result, fmt.Sprintf("no log line matches %q", check.Pattern))
 	}
@@ -465,6 +504,51 @@ func (v *ManifestVerifier) checkSQL(ctx context.Context, env Environment, check 
 	}
 	result.Passed = true
 	result.Detail = fmt.Sprintf("sql value %v within bounds", value)
+	return result
+}
+
+// checkReplay grades a replay-based quality check. The field is one of
+// error_rate|success_rate|p99_ms|rps|errors_reset, compared against expect.min
+// or expect.max using the replay result from the single observation window.
+func (v *ManifestVerifier) checkReplay(ctx context.Context, env Environment, check Check, replayResult ReplayResult) Result {
+	result := Result{Check: check}
+	if check.Field == "" {
+		return fail(result, "replay check requires a field: error_rate|success_rate|p99_ms|rps|errors_reset")
+	}
+	var value float64
+	switch check.Field {
+	case "error_rate":
+		total := replayResult.Requests + replayResult.Errors
+		if total > 0 {
+			value = float64(replayResult.Errors) / float64(total)
+		}
+	case "success_rate":
+		total := replayResult.Requests + replayResult.Errors
+		if total > 0 {
+			value = float64(replayResult.Requests) / float64(total)
+		}
+	case "p99_ms":
+		value = float64(replayResult.LatencyP99.Nanoseconds()) / 1e6
+	case "rps":
+		value = replayResult.RPS
+	case "errors_reset":
+		value = float64(replayResult.Errors)
+	default:
+		return fail(result, fmt.Sprintf("unknown replay field %q", check.Field))
+	}
+	result.Evidence = fmt.Sprintf("%s = %v", check.Field, value)
+
+	if check.Expect == nil {
+		return fail(result, "replay check requires expect.min or expect.max")
+	}
+	if check.Expect.Min != nil && value < *check.Expect.Min {
+		return fail(result, fmt.Sprintf("%s = %v, want >= %v", check.Field, value, *check.Expect.Min))
+	}
+	if check.Expect.Max != nil && value > *check.Expect.Max {
+		return fail(result, fmt.Sprintf("%s = %v, want <= %v", check.Field, value, *check.Expect.Max))
+	}
+	result.Passed = true
+	result.Detail = fmt.Sprintf("%s = %v within bounds", check.Field, value)
 	return result
 }
 

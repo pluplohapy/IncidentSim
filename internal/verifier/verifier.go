@@ -41,6 +41,7 @@ const (
 	CheckLog    CheckKind = "log"
 	CheckPolicy CheckKind = "policy"
 	CheckExec   CheckKind = "exec"
+	CheckReplay CheckKind = "replay"
 )
 
 // Gate identifies which level a check belongs to.
@@ -75,6 +76,23 @@ type Check struct {
 	// that edits the file must be visible to the check and one that only
 	// touches the environment must not be.
 	File string `json:"file,omitempty"`
+	// Agg is the aggregate function for metric checks over a sampled series:
+	// max|min|avg|last|p95|slope|delta|resets. When set, the check reads from
+	// the replay sampler instead of a single scrape.
+	Agg string `json:"agg,omitempty"`
+	// Window is the observation slice for metric/replay checks. From skips the
+	// warmup (e.g. "5s").
+	Window *Window `json:"window,omitempty"`
+	// Absent is for log checks: when true, the check passes when NO line
+	// matches Pattern (e.g. no secrets in logs).
+	Absent bool `json:"absent,omitempty"`
+	// Field is for replay checks: error_rate|success_rate|p99_ms|rps|errors_reset.
+	Field string `json:"field,omitempty"`
+}
+
+// Window is the observation slice of a replay. From skips the warmup.
+type Window struct {
+	From string `json:"from,omitempty"` // e.g. "5s"
 }
 
 // Expectation is the pass condition.
@@ -182,6 +200,15 @@ type CheckSet struct {
 
 // Empty reports whether the set declares no checks at all.
 func (s CheckSet) Empty() bool { return len(s.Correctness) == 0 && len(s.Quality) == 0 }
+
+// ReplayTargetService returns the target service for replay, preferring the
+// explicit replay.target_service from the manifest.
+func (s CheckSet) ReplayTargetService() string {
+	if s.Replay != nil {
+		return s.Replay.TargetService
+	}
+	return ""
+}
 
 // NewReport builds an empty report for a session.
 func NewReport(sessionID, taskID string) Report {
