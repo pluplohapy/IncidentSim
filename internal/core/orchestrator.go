@@ -887,47 +887,6 @@ func (o *Orchestrator) Exec(ctx context.Context, sessionID string, req runtime.E
 	return result, nil
 }
 
-// ExecSQL runs a statement against a database service of a session. It is the
-// participant's write path for a db-level task: `incidentsim apply --sql` ends
-// up here.
-func (o *Orchestrator) ExecSQL(ctx context.Context, sessionID, service, statement string) (runtime.ExecResult, error) {
-	session, err := o.Sessions.Get(sessionID)
-	if err != nil {
-		return runtime.ExecResult{}, err
-	}
-	adapter, err := o.adapterFor(session)
-	if err != nil {
-		return runtime.ExecResult{}, err
-	}
-	result, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
-		Service: service,
-		Command: sqlCommand(session.manifest, service, statement),
-		Timeout: 30 * time.Second,
-	})
-	if err == nil && result.ExitCode != 0 {
-		err = fmt.Errorf("statement exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
-	}
-	if err != nil {
-		session.journal.Record(EventFixFailed, "statement could not be applied", map[string]any{
-			"service":   service,
-			"statement": statement,
-			"error":     err.Error(),
-		})
-		return result, err
-	}
-	session.mu.Lock()
-	session.AppliedFixes = append(session.AppliedFixes, runtime.EnvPatch{
-		Service: service,
-		Command: sqlCommand(session.manifest, service, statement),
-	})
-	session.mu.Unlock()
-	session.journal.Record(EventFixApplied, "participant ran a statement", map[string]any{
-		"service":   service,
-		"statement": statement,
-	})
-	return result, nil
-}
-
 // Env returns the effective environment of a service of a session.
 //
 // It is how a participant diagnoses a config-level incident: the fault is a

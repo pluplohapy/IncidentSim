@@ -124,35 +124,3 @@ func (r *Registry) registeredLocked() string {
 	sort.Strings(kinds)
 	return fmt.Sprint(kinds)
 }
-
-// StubInjector is the placeholder used until an engine-backed injector exists.
-// It exists so the contract is testable before the implementations and so a
-// manifest that declares an unimplemented fault fails loudly instead of
-// silently starting a healthy environment.
-type StubInjector struct {
-	KindValue string
-	// Called records the faults the stub was asked to activate.
-	Called []Fault
-}
-
-// NewStub returns a stub for a fault kind.
-func NewStub(kind string) *StubInjector { return &StubInjector{KindValue: kind} }
-
-// Kind implements Injector.
-func (s *StubInjector) Kind() string { return s.KindValue }
-
-// Activate implements Injector. It never changes the environment: the runtime
-// contract guarantees a task either runs its declared fault or does not start.
-func (s *StubInjector) Activate(ctx context.Context, env Environment, fault Fault) error {
-	s.Called = append(s.Called, fault)
-	return fmt.Errorf("%w: %s injector is a stub", ErrBadOptions, fault.Kind)
-}
-
-// WithStubs returns a registry holding a stub for every known fault kind.
-func WithStubs() *Registry {
-	registry := NewRegistry()
-	for _, kind := range Kinds() {
-		registry.Register(NewStub(kind))
-	}
-	return registry
-}

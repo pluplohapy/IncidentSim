@@ -56,8 +56,7 @@ func (e *ErrAPI) Error() string {
 	return fmt.Sprintf("core returned %d: %s", e.Status, e.Message)
 }
 
-// Get performs a GET against the core API. It is exported so the demo command
-// can read the catalog without duplicating the request path.
+// Get performs a GET against the core API.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.call(ctx, http.MethodGet, path, nil, out)
 }

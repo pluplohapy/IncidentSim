@@ -7,16 +7,22 @@ import (
 	"testing"
 )
 
+type testInjector struct{ kind string }
+
+func (i testInjector) Kind() string { return i.kind }
+
+func (testInjector) Activate(_ context.Context, _ Environment, _ Fault) error { return nil }
+
 func TestRegistryRegistersAndReturnsInjectors(t *testing.T) {
 	registry := NewRegistry()
-	stub := NewStub(KindFeatureFlag)
-	registry.Register(stub)
+	registered := testInjector{kind: KindFeatureFlag}
+	registry.Register(registered)
 
 	got, err := registry.Get(KindFeatureFlag)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got != stub {
+	if got != registered {
 		t.Fatal("registry returned a different injector")
 	}
 	if kinds := registry.Kinds(); len(kinds) != 1 || kinds[0] != KindFeatureFlag {
@@ -37,8 +43,8 @@ func TestRegistryReportsUnknownKind(t *testing.T) {
 
 func TestRegistryReplacesDuplicateKind(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(NewStub(KindKill))
-	replacement := NewStub(KindKill)
+	registry.Register(testInjector{kind: KindKill})
+	replacement := testInjector{kind: KindKill}
 	registry.Register(replacement)
 	got, err := registry.Get(KindKill)
 	if err != nil {
@@ -46,26 +52,6 @@ func TestRegistryReplacesDuplicateKind(t *testing.T) {
 	}
 	if got != replacement {
 		t.Fatal("second registration did not replace the first")
-	}
-}
-
-func TestWithStubsCoversEveryKnownKind(t *testing.T) {
-	registry := WithStubs()
-	for _, kind := range Kinds() {
-		if _, err := registry.Get(kind); err != nil {
-			t.Fatalf("kind %s missing from stub registry: %v", kind, err)
-		}
-	}
-}
-
-func TestStubInjectorNeverChangesEnvironment(t *testing.T) {
-	stub := NewStub(KindStress)
-	err := stub.Activate(context.Background(), nil, Fault{Kind: KindStress, Target: "app"})
-	if err == nil {
-		t.Fatal("stub activated a fault without an environment")
-	}
-	if len(stub.Called) != 1 || stub.Called[0].Target != "app" {
-		t.Fatalf("stub recorded %+v", stub.Called)
 	}
 }
 
