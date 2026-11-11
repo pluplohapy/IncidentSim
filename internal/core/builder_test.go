@@ -18,6 +18,7 @@ func TestGoBuilderContainerArgsAreBoundedAndCrossCompileForHostArch(t *testing.T
 		"-e", "GOARCH=" + runtime.GOARCH,
 		"-e", "CGO_ENABLED=0",
 		"-v", "cache:/go/pkg/mod",
+		"-v", "cache:/root/.cache/go-build",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("containerArgs() = %v, want %v", got, want)

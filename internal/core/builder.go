@@ -147,6 +147,7 @@ func (b *GoBuilder) containerArgs() []string {
 		"-e", "GOARCH=" + stdRuntime.GOARCH,
 		"-e", "CGO_ENABLED=0",
 		"-v", b.BuildCache + ":/go/pkg/mod",
+		"-v", b.BuildCache + ":/root/.cache/go-build",
 	}
 }
 

@@ -81,8 +81,10 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	if err := os.MkdirAll(project.client.ProjectDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create project dir: %w", err)
 	}
-	if err := writeServiceConfig(project.client.ProjectDir, spec); err != nil {
-		return nil, err
+	if spec.WorkspaceDir == "" {
+		if err := writeServiceConfig(project.client.ProjectDir, spec); err != nil {
+			return nil, err
+		}
 	}
 	document := Project(project.client.ProjectDir, projectName(sessionID), spec)
 	if err := os.WriteFile(filepath.Join(project.client.ProjectDir, composeFile), []byte(document), 0o600); err != nil {
@@ -342,8 +344,10 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 	// Sync the generated config file so env changes (e.g. LOG_LEVEL=info)
 	// are reflected in the file mounted into the container. The service
 	// reads this file at startup, so a stale config file would mask the fix.
-	if err := writeServiceConfig(project.client.ProjectDir, project.spec); err != nil {
-		return nil, fmt.Errorf("sync config file: %w", err)
+	if project.spec.WorkspaceDir == "" {
+		if err := writeServiceConfig(project.client.ProjectDir, project.spec); err != nil {
+			return nil, fmt.Errorf("sync config file: %w", err)
+		}
 	}
 	// Files are written to the host filesystem inside the compose project
 	// directory: the config file is mounted into the container, so writing it
@@ -431,7 +435,7 @@ func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Arti
 		return a.describe(project), nil
 	case "files":
 		for path, content := range art.Files {
-			hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(path))
+			hostPath := project.artifactFilePath(path)
 			if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
 				return nil, err
 			}
@@ -451,6 +455,23 @@ func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Arti
 	default:
 		return nil, fmt.Errorf("unknown artifact kind %q", art.Kind)
 	}
+}
+
+// artifactFilePath keeps a workspace-backed configuration task on one source
+// of truth. The core has already validated and written the participant's
+// workspace; Deploy must not silently write a second, unused copy in the
+// Compose project directory.
+func (p *session) artifactFilePath(path string) string {
+	if p.spec.WorkspaceDir != "" {
+		clean := strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator))
+		if strings.HasPrefix(clean, "etc/app/") {
+			clean = filepath.Join("config", strings.TrimPrefix(clean, "etc/app/"))
+		}
+		if !strings.HasPrefix(clean, ".."+string(filepath.Separator)) && clean != ".." {
+			return filepath.Join(p.spec.WorkspaceDir, clean)
+		}
+	}
+	return filepath.Join(p.client.ProjectDir, "config", filepath.Base(path))
 }
 
 // buildBinaryImage builds a thin image from the artifact's binary and returns

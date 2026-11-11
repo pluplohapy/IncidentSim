@@ -167,24 +167,29 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 
 	spec := o.runtimeSpec(task)
 	spec.WorkspaceDir = session.WorkspaceDir
-	// Only a code-level task ships a buildable workspace: its scenario has a
-	// Dockerfile, and rebuilding the image from the broken code is what makes
-	// the initial state the declared one. A config-, db- or composite-level
-	// task has a workspace of configuration files only — building an image
-	// from it would fail, and none is needed: the adapter writes the config
-	// into the compose project and recreates the service.
+	// Build code-level workspaces through the engine-agnostic Builder. The
+	// initial image in the manifest is only a bootstrap image; Deploy installs
+	// the broken workspace artifact before the fault is activated.
+	var initialArtifact *runtime.Artifact
 	if session.WorkspaceDir != "" && task.Metadata.Level == manifest.LevelCode {
-		imageTag, err := o.buildWorkspaceImage(ctx, session)
+		if o.Builder == nil {
+			cleanup()
+			return nil, fmt.Errorf("no builder configured for code-level task %s", taskID)
+		}
+		artifact, err := o.Builder.Build(ctx, session.WorkspaceDir)
 		if err != nil {
 			cleanup()
-			journal.Record(EventFaultFailed, "workspace image build failed", map[string]any{"error": err.Error()})
-			return nil, fmt.Errorf("build workspace image: %w", err)
+			journal.Record(EventBuildFailed, "build failed", map[string]any{"error": err.Error()})
+			return nil, fmt.Errorf("build workspace: %w", err)
 		}
-		for i := range spec.Services {
-			if spec.Services[i].Name == "app" {
-				spec.Services[i].Image = imageTag
-				break
-			}
+		if artifact == nil {
+			cleanup()
+			journal.Record(EventBuildFailed, "build returned no artifact", nil)
+			return nil, fmt.Errorf("build workspace: builder returned no artifact")
+		}
+		initialArtifact = artifact
+		if artifact.Path != "" {
+			defer os.RemoveAll(filepath.Dir(artifact.Path))
 		}
 	}
 
@@ -193,6 +198,14 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 		cleanup()
 		journal.Record(EventFaultFailed, "environment failed to start", map[string]any{"error": err.Error()})
 		return nil, fmt.Errorf("start environment: %w", err)
+	}
+	if initialArtifact != nil {
+		instance, err = adapter.Deploy(ctx, session.ID, *initialArtifact, true)
+		if err != nil {
+			cleanup()
+			journal.Record(EventBuildFailed, "initial artifact deploy failed", map[string]any{"error": err.Error()})
+			return nil, fmt.Errorf("deploy initial workspace: %w", err)
+		}
 	}
 	session.mu.Lock()
 	session.instance = instance
@@ -399,28 +412,40 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	// Only a code-level fix needs a rebuilt image. Compose Reset restores the
-	// baseline, which already carries the code-level image tag (substituted at
-	// Start). Config-level and db-level tasks don't rebuild images.
+	// Compose Reset restores the declared baseline image. Code-level tasks then
+	// deploy a freshly built baseline workspace artifact through the same H1
+	// path as Apply; config/db tasks need no build.
 	if session.WorkspaceDir != "" && session.manifest.Metadata.Level == manifest.LevelCode {
-		imageTag, err := o.buildWorkspaceImage(ctx, session)
+		if o.Builder == nil {
+			return fmt.Errorf("no builder configured for code-level task %s", session.TaskID)
+		}
+		instance, err := adapter.Reset(ctx, session.ID)
 		if err != nil {
-			return fmt.Errorf("build workspace image: %w", err)
+			return fmt.Errorf("reset environment: %w", err)
 		}
-		// A new image changes nothing while the old container keeps running:
-		// the service has to be recreated from it, which is what the restart
-		// asks the adapter to do. Without it the reset of a code-level task
-		// would hand out the participant's fixed image as the incident.
-		if _, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{Service: "app", Image: imageTag, Restart: true}); err != nil {
-			return fmt.Errorf("apply image tag: %w", err)
+		o.refreshInstance(session, instance)
+		artifact, err := o.Builder.Build(ctx, session.WorkspaceDir)
+		if err != nil {
+			return fmt.Errorf("build workspace: %w", err)
 		}
+		if artifact == nil {
+			return fmt.Errorf("builder returned no artifact")
+		}
+		if artifact.Path != "" {
+			defer os.RemoveAll(filepath.Dir(artifact.Path))
+		}
+		instance, err = adapter.Deploy(ctx, session.ID, *artifact, true)
+		if err != nil {
+			return fmt.Errorf("deploy baseline workspace: %w", err)
+		}
+		o.refreshInstance(session, instance)
+	} else {
+		instance, err := adapter.Reset(ctx, session.ID)
+		if err != nil {
+			return fmt.Errorf("reset environment: %w", err)
+		}
+		o.refreshInstance(session, instance)
 	}
-
-	instance, err := adapter.Reset(ctx, session.ID)
-	if err != nil {
-		return fmt.Errorf("reset environment: %w", err)
-	}
-	o.refreshInstance(session, instance)
 	session.mu.Lock()
 	session.AppliedFixes = nil
 	session.FaultArtifacts = nil
@@ -645,11 +670,14 @@ func (o *Orchestrator) configArtifact(session *Session) (runtime.Artifact, error
 		if err != nil {
 			return err
 		}
+		if !strings.HasPrefix(filepath.ToSlash(rel), "config/") {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		artifact.Files[rel] = data
+		artifact.Files[filepath.ToSlash(filepath.Join("/etc/app", strings.TrimPrefix(filepath.ToSlash(rel), "config/")))] = data
 		return nil
 	})
 	return artifact, err
@@ -1245,36 +1273,6 @@ func (o *Orchestrator) validateEditableFiles(session *Session) error {
 // hashEqual compares two byte slices by SHA-256 in constant time.
 func hashEqual(a, b []byte) bool {
 	return sha256.Sum256(a) == sha256.Sum256(b)
-}
-
-// buildWorkspaceImage builds a Docker image from the session workspace
-// and returns the image tag.
-func (o *Orchestrator) buildWorkspaceImage(ctx context.Context, session *Session) (string, error) {
-	session.mu.Lock()
-	dst := session.WorkspaceDir
-	session.mu.Unlock()
-	if dst == "" {
-		return "", fmt.Errorf("no workspace for session %s", session.ID)
-	}
-	tag := fmt.Sprintf("incidentsim/workload:session-%s", session.ID)
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, ".")
-	cmd.Dir = dst
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		session.journal.Record(EventBuildFailed, "docker build failed", map[string]any{
-			"service": "app",
-			"tag":     tag,
-			"stderr":  stderr.String(),
-		})
-		return "", fmt.Errorf("docker build: %w: %s", err, stderr.String())
-	}
-	session.journal.Record(EventBuildOK, "docker image built", map[string]any{
-		"service": "app",
-		"tag":     tag,
-	})
-	return tag, nil
 }
 
 // validateFilePath rejects absolute paths and any ..-segment so that a

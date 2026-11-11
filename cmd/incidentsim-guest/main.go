@@ -156,7 +156,8 @@ func (a *agent) handler() http.Handler {
 
 // handlePutFile atomically installs a binary or static files supplied by the
 // host adapter, then restarts the requested service. It deliberately accepts
-// no arbitrary destination paths: an artifact stays under /run/incidentsim.
+// no arbitrary destination paths: files may only replace the service config
+// under /etc/app or an agent-owned path under /run/incidentsim.
 func (a *agent) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -203,11 +204,12 @@ func (a *agent) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		a.config.Services[index].Command = []string{path}
 	} else {
 		for name, content := range request.Files {
-			if filepath.IsAbs(name) || strings.Contains(filepath.Clean(name), "..") {
+			clean := filepath.Clean(name)
+			if !strings.HasPrefix(clean, "/etc/app/") && !strings.HasPrefix(clean, "/run/incidentsim/") {
 				http.Error(w, "invalid artifact file "+name, http.StatusBadRequest)
 				return
 			}
-			if err := atomicWrite(filepath.Join("/run/incidentsim/files", name), content, 0o600); err != nil {
+			if err := atomicWrite(clean, content, 0o600); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
