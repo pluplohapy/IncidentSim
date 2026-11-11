@@ -222,6 +222,11 @@ type Spec struct {
 	MemoryMiB int
 	// FaultEnv holds the variables the injector wants present at boot.
 	FaultEnv map[string]string
+	// WorkspaceDir is the session workspace directory. When set and it
+	// contains a config/ directory, the compose engine mounts it directly
+	// instead of generating a service config file (B2: единый источник
+	// файлов для config-задач).
+	WorkspaceDir string
 }
 
 // ServiceSpec is one service to run.

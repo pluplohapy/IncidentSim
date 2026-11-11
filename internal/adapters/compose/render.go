@@ -2,6 +2,8 @@ package compose
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -26,7 +28,7 @@ func Project(projectDir, name string, spec runtime.Spec) string {
 	b.WriteString("\nservices:\n")
 
 	for _, service := range spec.Services {
-		writeService(&b, projectDir, service, spec.FaultEnv, spec.CPUCount, spec.MemoryMiB)
+		writeService(&b, projectDir, service, spec.FaultEnv, spec.CPUCount, spec.MemoryMiB, spec.WorkspaceDir)
 	}
 
 	b.WriteString("networks:\n  default:\n    name: ")
@@ -35,7 +37,7 @@ func Project(projectDir, name string, spec runtime.Spec) string {
 	return b.String()
 }
 
-func writeService(b *strings.Builder, projectDir string, service runtime.ServiceSpec, faultEnv map[string]string, cpuCount, memoryMiB int) {
+func writeService(b *strings.Builder, projectDir string, service runtime.ServiceSpec, faultEnv map[string]string, cpuCount, memoryMiB int, workspaceDir string) {
 	b.WriteString("  ")
 	b.WriteString(service.Name)
 	b.WriteString(":\n")
@@ -71,17 +73,27 @@ func writeService(b *strings.Builder, projectDir string, service runtime.Service
 		}
 	}
 
-	// The generated configuration file is mounted into the container. It is
-	// read-only on purpose: the file the service loads is the host's file, so
-	// a write inside the container would change what a verification grades
-	// without going through Apply (which records it, validates it against
-	// spec.editable and re-creates the service). A shell inside the container
-	// can read it, which is what debugging needs, and cannot silently rewrite
-	// the artefact it is graded on.
-	b.WriteString("    volumes:\n")
-	b.WriteString(fmt.Sprintf("      - %q\n",
-		fmt.Sprintf("%s:%s/%s:ro",
-			configPath(projectDir, service.Name), configMountDir, service.Name+".conf")))
+	// B2: единый источник файлов для config-задач. Когда у сессии есть
+	// workspace с config/, монтируем его напрямую в /etc/app — файл,
+	// который участник правит, тот и загружает сервис при старте. Повторный
+	// Apply с Vars больше не затирает применённые файлы: источник правды —
+	// сам workspace, а не сгенерированный env-файл.
+	useWorkspace := workspaceDir != ""
+	if useWorkspace {
+		if _, err := os.Stat(filepath.Join(workspaceDir, "config")); err != nil {
+			useWorkspace = false
+		}
+	}
+	if useWorkspace {
+		b.WriteString("    volumes:\n")
+		b.WriteString(fmt.Sprintf("      - %q\n",
+			fmt.Sprintf("%s:%s:ro", filepath.Join(workspaceDir, "config"), configMountDir)))
+	} else {
+		b.WriteString("    volumes:\n")
+		b.WriteString(fmt.Sprintf("      - %q\n",
+			fmt.Sprintf("%s:%s/%s:ro",
+				configPath(projectDir, service.Name), configMountDir, service.Name+".conf")))
+	}
 
 	if service.Healthcheck != nil {
 		interval := service.Healthcheck.IntervalSeconds

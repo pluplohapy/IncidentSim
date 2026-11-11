@@ -171,6 +171,7 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 	}
 
 	spec := o.runtimeSpec(task)
+	spec.WorkspaceDir = session.WorkspaceDir
 	// Only a code-level task ships a buildable workspace: its scenario has a
 	// Dockerfile, and rebuilding the image from the broken code is what makes
 	// the initial state the declared one. A config-, db- or composite-level
