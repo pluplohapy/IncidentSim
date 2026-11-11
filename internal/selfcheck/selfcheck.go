@@ -61,7 +61,11 @@ type DistractorResult struct {
 
 // Contract runs the full selfcheck contract for one task.
 func Contract(ctx context.Context, api *cli.Client, taskID string) (*Result, error) {
-	res := &Result{TaskID: taskID, Engine: "compose"}
+	return contract(ctx, api, taskID, "compose")
+}
+
+func contract(ctx context.Context, api *cli.Client, taskID, engine string) (*Result, error) {
+	res := &Result{TaskID: taskID, Engine: engine}
 
 	// Ensure the task exists.
 	if err := ensureTask(ctx, api, taskID); err != nil {
@@ -83,7 +87,7 @@ func Contract(ctx context.Context, api *cli.Client, taskID string) (*Result, err
 
 	// (a) Start.
 	start := time.Now()
-	sessionID, err := api.Start(ctx, taskID)
+	sessionID, err := api.StartEngine(ctx, taskID, engine)
 	res.StartTime = time.Since(start)
 	res.StartOK = err == nil
 	if err != nil {
@@ -197,11 +201,10 @@ func Contract(ctx context.Context, api *cli.Client, taskID string) (*Result, err
 // remains the source of truth for the actually running adapter; this parameter
 // makes CI output explicit when the same selfcheck is run in an engine matrix.
 func ContractForEngine(ctx context.Context, api *cli.Client, taskID, engine string) (*Result, error) {
-	result, err := Contract(ctx, api, taskID)
-	if engine != "" {
-		result.Engine = engine
+	if engine == "" {
+		engine = "compose"
 	}
-	return result, err
+	return contract(ctx, api, taskID, engine)
 }
 
 // Print prints a human-readable selfcheck result.

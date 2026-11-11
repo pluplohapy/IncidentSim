@@ -171,6 +171,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var body struct {
 			TaskID string `json:"task_id"`
+			Engine string `json:"engine,omitempty"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
@@ -180,7 +181,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "task_id is required", "")
 			return
 		}
-		session, err := s.Orchestrator.Start(r.Context(), body.TaskID)
+		session, err := s.Orchestrator.StartWithEngine(r.Context(), body.TaskID, body.Engine)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error(), sessionStateDetail(session))
 			return

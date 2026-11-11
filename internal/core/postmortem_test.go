@@ -49,6 +49,16 @@ func TestPartialFixIsDetectedFromTheJournal(t *testing.T) {
 	}
 }
 
+func TestDistractorAndFailedCheckAreExtracted(t *testing.T) {
+	distractor, check := distractorFrom([]Event{{
+		Type: EventFixApplied,
+		Data: map[string]any{"distractor": "restart-only", "fails_check": "pool-in-use"},
+	}})
+	if distractor != "restart-only" || check != "pool-in-use" {
+		t.Fatalf("distractor = %q, check = %q", distractor, check)
+	}
+}
+
 func TestFullFixIsNotAPartialFix(t *testing.T) {
 	journal := journalWith(t, []Event{
 		verifyEvent(verifier.VerdictPass, verifier.VerdictPass, verifier.VerdictPass, "replay: 0 errors"),

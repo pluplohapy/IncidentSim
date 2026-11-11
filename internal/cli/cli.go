@@ -172,6 +172,11 @@ func (c *Client) Show(ctx context.Context, taskID string) error {
 
 // Start begins a task and returns the new session id.
 func (c *Client) Start(ctx context.Context, taskID string) (string, error) {
+	return c.StartEngine(ctx, taskID, "")
+}
+
+// StartEngine starts a task, optionally selecting a runtime for selfcheck.
+func (c *Client) StartEngine(ctx context.Context, taskID, engine string) (string, error) {
 	var session struct {
 		ID           string   `json:"id"`
 		State        string   `json:"state"`
@@ -180,7 +185,11 @@ func (c *Client) Start(ctx context.Context, taskID string) (string, error) {
 		WorkspaceDir string   `json:"workspace_dir,omitempty"`
 		Editable     []string `json:"editable,omitempty"`
 	}
-	if err := c.post(ctx, "/api/v1/sessions", map[string]string{"task_id": taskID}, &session); err != nil {
+	body := map[string]string{"task_id": taskID}
+	if engine != "" {
+		body["engine"] = engine
+	}
+	if err := c.post(ctx, "/api/v1/sessions", body, &session); err != nil {
 		return "", err
 	}
 	fmt.Fprintf(c.Out, "session %s is %s on engine %s\n", session.ID, session.State, session.Engine)

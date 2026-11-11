@@ -112,11 +112,21 @@ func (o *Orchestrator) endOp(sessionID string) {
 // Start begins a task: it provisions the environment, activates the declared
 // fault and returns the live session.
 func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, error) {
+	return o.StartWithEngine(ctx, taskID, "")
+}
+
+// StartWithEngine is the same lifecycle entry point with an optional runtime
+// override used by the engine selfcheck. Normal participants use the engine
+// declared by the task manifest.
+func (o *Orchestrator) StartWithEngine(ctx context.Context, taskID, engineOverride string) (*Session, error) {
 	task, err := o.Catalog.Load(taskID)
 	if err != nil {
 		return nil, err
 	}
 	engine := task.Spec.Runtime.Engine
+	if engineOverride != "" {
+		engine = engineOverride
+	}
 	adapter, ok := o.Adapters[engine]
 	if !ok {
 		return nil, fmt.Errorf("task %q needs engine %q, which this deployment does not have (have %v)", taskID, engine, adapterNames(o.Adapters))

@@ -56,6 +56,10 @@ type Postmortem struct {
 	PartialFix bool `json:"partial_fix"`
 	// PartialFixNote explains what a partial fix means for this task.
 	PartialFixNote string `json:"partial_fix_note,omitempty"`
+	// FailedDistractor and FailedCheck identify the data-driven mask caught by
+	// the quality gate, when the journal contains a distractor application.
+	FailedDistractor string `json:"failed_distractor,omitempty"`
+	FailedCheck      string `json:"failed_check,omitempty"`
 
 	// Theory is the teaching material of the task.
 	Theory string `json:"theory,omitempty"`
@@ -118,6 +122,7 @@ func (o *Orchestrator) loadPostmortemFromJournal(sessionID string) (Postmortem, 
 	postmortem.FinishedAt = lastEventTime(journal.Events())
 	postmortem.Duration = humanDuration(postmortem.StartedAt, postmortem.FinishedAt)
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(journal.Events())
+	postmortem.FailedDistractor, postmortem.FailedCheck = distractorFrom(journal.Events())
 	postmortem.WorkspaceDiffs = workspaceDiffs(journal.Events())
 	postmortem.applyStats(journal.Events())
 	return postmortem, nil
@@ -140,6 +145,7 @@ func (o *Orchestrator) postmortemFrom(session *Session) (Postmortem, error) {
 		postmortem.AppliedFixes = append(postmortem.AppliedFixes, describePatch(patch))
 	}
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(events)
+	postmortem.FailedDistractor, postmortem.FailedCheck = distractorFrom(events)
 	postmortem.WorkspaceDiffs = workspaceDiffs(events)
 	postmortem.applyStats(events)
 	return postmortem, nil
@@ -148,7 +154,7 @@ func (o *Orchestrator) postmortemFrom(session *Session) (Postmortem, error) {
 func (p *Postmortem) applyStats(events []Event) {
 	for _, event := range events {
 		switch event.Type {
-		case EventExecRun:
+		case EventExecRun, EventExecFailed, EventMetrics:
 			if p.TTD == "" && !p.StartedAt.IsZero() {
 				p.TTD = event.At.Sub(p.StartedAt).Round(time.Second).String()
 			}
@@ -226,6 +232,21 @@ func partialFixFrom(events []Event) (bool, string) {
 			"Quality gate при этом красный, поэтому замечание не декоративное."
 	}
 	return false, ""
+}
+
+func distractorFrom(events []Event) (string, string) {
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type != EventFixApplied || event.Data == nil {
+			continue
+		}
+		distractor := stringOf(event.Data["distractor"])
+		fails := stringOf(event.Data["fails_check"])
+		if distractor != "" || fails != "" {
+			return distractor, fails
+		}
+	}
+	return "", ""
 }
 
 func workspaceDiffs(events []Event) []string {
@@ -348,6 +369,9 @@ func (p Postmortem) Render() string {
 	if p.PartialFix {
 		b.WriteString("## Частичный фикс\n\n")
 		b.WriteString(p.PartialFixNote + "\n\n")
+		if p.FailedDistractor != "" || p.FailedCheck != "" {
+			b.WriteString(fmt.Sprintf("Дистрактор: `%s`; упавшая quality-проверка: `%s`.\n\n", p.FailedDistractor, p.FailedCheck))
+		}
 	}
 
 	b.WriteString("## Эталонное решение\n\n")
