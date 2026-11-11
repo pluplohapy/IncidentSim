@@ -42,6 +42,7 @@ const (
 	CheckPolicy CheckKind = "policy"
 	CheckExec   CheckKind = "exec"
 	CheckReplay CheckKind = "replay"
+	CheckUnit   CheckKind = "unit"
 )
 
 // Gate identifies which level a check belongs to.
@@ -170,6 +171,8 @@ type Environment interface {
 	Env(ctx context.Context, service string) (map[string]string, error)
 	// SQL runs a statement against a service and returns its rows.
 	SQL(ctx context.Context, service, statement string) ([]map[string]string, error)
+	// WorkspaceDir returns the participant workspace dir, or "" if none.
+	WorkspaceDir() string
 }
 
 // ReplayConfig is the load a verification replays. Replaying load is what keeps

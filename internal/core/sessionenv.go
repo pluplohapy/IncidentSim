@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,29 +125,38 @@ func (e *verifyEnv) SQL(ctx context.Context, service, statement string) ([]map[s
 	return rows, nil
 }
 
+// WorkspaceDir returns the participant workspace dir for unit checks.
+func (e *verifyEnv) WorkspaceDir() string {
+	e.session.mu.Lock()
+	defer e.session.mu.Unlock()
+	return e.session.WorkspaceDir
+}
+
 // sqlCommand builds the command that runs a statement on a database service.
 //
-// The statement is executed as the database role, not as root: the official
-// postgres image refuses a root connection, and a check that cannot connect
-// would fail for the wrong reason. A task can name its own client and role
-// through the SQL_CLIENT environment variable of the service, which is what
-// keeps a MySQL task from needing a change in the core.
+// B9: postgres:16-alpine does not ship gosu, so we connect over TCP using a
+// psql connection string that embeds the password. This avoids both gosu and
+// user-switching. A task can name its own client and role through the
+// SQL_CLIENT environment variable of the service, which keeps a MySQL task
+// from needing a change in the core.
 func sqlCommand(m *manifest.Manifest, service, statement string) []string {
-	command := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement}
 	if declared, ok := m.Service(service); ok {
 		if cli := declared.Env["SQL_CLIENT"]; cli != "" {
-			command = append(strings.Split(cli, " "), "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
-			return command
+			return append(strings.Split(cli, " "), "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
 		}
-		// Without a database name psql connects to the default database, which
-		// is where "relation does not exist" comes from: the task database is
-		// the one the service declares. The statement stays last, after -c.
-		if database := databaseName(declared.Env); database != "" {
-			head := []string{"gosu", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-d", database}
-			command = append(head, "-c", statement)
+		role := declared.Env["POSTGRES_USER"]
+		if role == "" {
+			role = "postgres"
 		}
+		password := declared.Env["POSTGRES_PASSWORD"]
+		database := databaseName(declared.Env)
+		connStr := fmt.Sprintf("postgresql://%s:%s@localhost:5432/%s?sslmode=disable",
+			url.QueryEscape(role), url.QueryEscape(password), url.QueryEscape(database))
+		args := []string{"psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", connStr, "-c", statement}
+		return args
 	}
-	return command
+	connStr := "postgresql://postgres:incidentsim@localhost:5432/postgres?sslmode=disable"
+	return []string{"psql", "-v", "ON_ERROR_STOP=1", "-t", "-A", connStr, "-c", statement}
 }
 
 // databaseName resolves the database a service is configured for. The database

@@ -44,6 +44,7 @@ const (
 	CheckPolicy = "policy"
 	CheckExec   = "exec"
 	CheckReplay = "replay"
+	CheckUnit   = "unit"
 )
 
 // Trigger values for fault activation.

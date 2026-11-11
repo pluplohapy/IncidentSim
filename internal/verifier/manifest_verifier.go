@@ -1,10 +1,15 @@
 package verifier
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +40,10 @@ type ManifestVerifier struct {
 	// manifest writes workloads/db-connection-leak.yaml exactly as the path
 	// looks on disk. A task whose profile cannot be loaded fails loudly.
 	ProjectDir string
+
+	// taskID is set for the duration of a Verify call so checkUnit can locate
+	// scenarios/<taskID>/checks. It is not safe for concurrent use.
+	taskID string
 }
 
 // NewManifestVerifier returns the default grader with production timeouts.
@@ -60,6 +69,8 @@ func NewManifestVerifier() *ManifestVerifier {
 //   - the quality gate measures aggregates from the sampler series (and the
 //     replay result), never an idle system.
 func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionID, taskID string, checks CheckSet) (Report, error) {
+	v.taskID = taskID
+	defer func() { v.taskID = "" }()
 	report := NewReport(sessionID, taskID)
 	if env == nil {
 		return report, fmt.Errorf("%w: no environment given", ErrProbeFailed)
@@ -237,6 +248,8 @@ func (v *ManifestVerifier) runQualityCheck(ctx context.Context, env Environment,
 		result = v.checkPolicy(ctx, env, check)
 	case CheckReplay:
 		result = v.checkReplay(ctx, env, check, replayResult)
+	case CheckUnit:
+		result = v.checkUnit(ctx, env, check, v.taskID)
 	default:
 		result.Passed = false
 		result.Detail = fmt.Sprintf("unknown check kind %q", check.Kind)
@@ -281,6 +294,8 @@ func (v *ManifestVerifier) runCheck(ctx context.Context, env Environment, check 
 		result = v.checkSQL(ctx, env, check)
 	case CheckPolicy:
 		result = v.checkPolicy(ctx, env, check)
+	case CheckUnit:
+		result = v.checkUnit(ctx, env, check, v.taskID)
 	default:
 		result.Passed = false
 		result.Detail = fmt.Sprintf("unknown check kind %q", check.Kind)
@@ -505,6 +520,92 @@ func (v *ManifestVerifier) checkSQL(ctx context.Context, env Environment, check 
 	result.Passed = true
 	result.Detail = fmt.Sprintf("sql value %v within bounds", value)
 	return result
+}
+
+// checkUnit runs hidden unit tests for pure-code tasks. The test files live in
+// scenarios/<taskID>/checks/*_test.go and are copied into a temporary directory
+// together with the participant's workspace, then executed with `go test -race`
+// in a throw-away container (--network none --read-only --memory --cpus
+// --pids-limit, 60 s timeout). The participant's code on the host is never
+// executed.
+func (v *ManifestVerifier) checkUnit(ctx context.Context, env Environment, check Check, taskID string) Result {
+	result := Result{Check: check}
+	checksDir := filepath.Join(v.ProjectDir, "scenarios", taskID, "checks")
+	testFiles, err := filepath.Glob(filepath.Join(checksDir, "*_test.go"))
+	if err != nil {
+		return fail(result, fmt.Sprintf("read checks dir %s: %v", checksDir, err))
+	}
+	if len(testFiles) == 0 {
+		return fail(result, fmt.Sprintf("no *_test.go found in %s", checksDir))
+	}
+
+	// Copy workspace + test files into a temp dir.
+	tmp, err := os.MkdirTemp("", "incidentsim-unit-*")
+	if err != nil {
+		return fail(result, fmt.Sprintf("create temp dir: %v", err))
+	}
+	defer os.RemoveAll(tmp)
+
+	wsDir := env.WorkspaceDir()
+	if wsDir == "" {
+		return fail(result, "environment has no workspace dir")
+	}
+	if err := copyDir(wsDir, tmp); err != nil {
+		return fail(result, fmt.Sprintf("copy workspace: %v", err))
+	}
+	for _, tf := range testFiles {
+		data, err := os.ReadFile(tf)
+		if err != nil {
+			return fail(result, fmt.Sprintf("read test file %s: %v", tf, err))
+		}
+		if err := os.WriteFile(filepath.Join(tmp, filepath.Base(tf)), data, 0o644); err != nil {
+			return fail(result, fmt.Sprintf("write test file %s: %v", tf, err))
+		}
+	}
+
+	// Run go test -race in a restricted container.
+	runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	args := []string{
+		"run", "--rm", "--network", "none", "--read-only",
+		"--memory", "512m", "--cpus", "1.0", "--pids-limit", "100",
+		"-v", tmp + ":/src:ro", "-w", "/src",
+		"golang:1.24-alpine", "go", "test", "-race", "./...",
+	}
+	cmd := exec.CommandContext(runCtx, "docker", args...)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		result.Evidence = strings.TrimSpace(out.String() + "\n" + stderr.String())
+		return fail(result, fmt.Sprintf("unit tests failed: %v", err))
+	}
+	result.Evidence = strings.TrimSpace(out.String())
+	result.Passed = true
+	result.Detail = "unit tests passed"
+	return result
+}
+
+// copyDir recursively copies src into dst.
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }
 
 // checkReplay grades a replay-based quality check. The field is one of

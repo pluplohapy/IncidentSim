@@ -21,6 +21,8 @@ type FakeEnvironment struct {
 	Err error
 	// ExecFunc answers Exec calls. If nil, Exec returns a zero result.
 	ExecFunc func(req runtime.ExecRequest) (runtime.ExecResult, error)
+	// WorkspaceDirValue is returned by WorkspaceDir().
+	WorkspaceDirValue string
 }
 
 // InstanceID implements Environment.
@@ -49,6 +51,9 @@ func (f FakeEnvironment) SQL(ctx context.Context, service, statement string) ([]
 	}
 	return f.SQLRows[service], nil
 }
+
+// WorkspaceDir implements Environment.
+func (f FakeEnvironment) WorkspaceDir() string { return f.WorkspaceDirValue }
 
 // Name implements runtime.Adapter.
 func (f FakeEnvironment) Name() string { return "fake" }
