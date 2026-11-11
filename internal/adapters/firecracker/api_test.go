@@ -182,3 +182,16 @@ func TestBootArgsAndConfigDefaults(t *testing.T) {
 		t.Fatalf("default memory = %d MiB", memoryMiB(Spec()))
 	}
 }
+
+func TestSessionNetworkAllocationIsStableAndDistinct(t *testing.T) {
+	first := guestIPForSession("session-a")
+	if first != guestIPForSession("session-a") {
+		t.Fatal("guest IP allocation is not stable")
+	}
+	if first == guestIPForSession("session-b") {
+		t.Fatal("different sessions received the same guest IP")
+	}
+	if tapForSession("session-a", "incidentsim-tap0") == tapForSession("session-b", "incidentsim-tap0") {
+		t.Fatal("different sessions received the same tap")
+	}
+}

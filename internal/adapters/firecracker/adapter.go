@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
@@ -85,6 +86,8 @@ type vm struct {
 	ports    map[string]int
 	pid      int
 	process  *exec.Cmd
+	guestIP  string
+	tap      string
 }
 
 // New returns an adapter using the given configuration.
@@ -113,6 +116,8 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 		spec:     cloneSpec(spec),
 		baseline: cloneSpec(spec),
 		ports:    map[string]int{},
+		guestIP:  guestIPForSession(sessionID),
+		tap:      tapForSession(sessionID, a.Config.TapDevice),
 	}
 	a.sessions[sessionID] = machine
 	a.mu.Unlock()
@@ -272,9 +277,9 @@ func (a *Adapter) start(ctx context.Context, machine *vm) error {
 	}); err != nil {
 		return fmt.Errorf("configure vsock: %w", err)
 	}
-	if a.Config.TapDevice != "" {
+	if machine.tap != "" {
 		if err := machine.api.AddNetworkInterface(ctx, NetworkInterface{
-			IfaceID: "eth0", HostDevName: a.Config.TapDevice, GuestMAC: "AA:FC:00:00:00:02",
+			IfaceID: "eth0", HostDevName: machine.tap, GuestMAC: macForIP(machine.guestIP),
 		}); err != nil {
 			return fmt.Errorf("configure network: %w", err)
 		}
@@ -354,7 +359,7 @@ func (a *Adapter) describe(machine *vm) *runtime.Instance {
 		if len(service.Ports) > 0 {
 			port = service.Ports[0]
 		}
-		endpoint := fmt.Sprintf("%s:%d", a.Config.GuestIP, port)
+		endpoint := fmt.Sprintf("%s:%d", machine.guestIP, port)
 		services = append(services, runtime.Service{
 			Name:          service.Name,
 			Endpoint:      endpoint,
@@ -712,6 +717,43 @@ func (machine *vm) snapshotName() string {
 // guest ids per VM; the adapter uses a fixed one so the guest agent can bind a
 // deterministic port.
 const vsockGuestCID = 3
+
+func guestIPForSession(sessionID string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionID))
+	return fmt.Sprintf("172.30.0.%d", 2+int(h.Sum32()%240))
+}
+
+func tapForSession(sessionID, configured string) string {
+	if configured == "" {
+		return ""
+	}
+	prefix := configured
+	if len(prefix) >= 1 {
+		for i := len(prefix) - 1; i >= 0; i-- {
+			if prefix[i] < '0' || prefix[i] > '9' {
+				prefix = prefix[:i+1]
+				break
+			}
+			if i == 0 {
+				prefix = ""
+			}
+		}
+	}
+	if prefix == "" {
+		prefix = "incidentsim-tap"
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionID))
+	return fmt.Sprintf("%s%d", prefix, h.Sum32()%8)
+}
+
+func macForIP(ip string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(ip))
+	v := h.Sum32()
+	return fmt.Sprintf("AA:FC:%02X:%02X:%02X:%02X", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
 
 func cpuCount(spec runtime.Spec) int {
 	if spec.CPUCount > 0 {
