@@ -288,7 +288,10 @@ func (a *Adapter) bootArgs(machine *vm) string {
 		"console=ttyS0",
 		"panic=1",
 		"pci=off",
-		"ip=off",
+		// Configure the fixed host-only bridge address in the guest. `ip=off`
+		// leaves eth0 without an address, making the Instance endpoints
+		// unreachable even though Firecracker has a network interface.
+		"ip=" + machine.guestIP + "::172.30.0.1:255.255.255.0::eth0:off",
 		"incidentsim.task=" + machine.id,
 		"incidentsim.agent_port=" + fmt.Sprint(a.Config.GuestAgentPort),
 		"root=/dev/vda",
@@ -473,9 +476,9 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 	return a.describe(machine), nil
 }
 
-// Deploy installs an artifact into the Firecracker guest. The implementation
-// is finalised in H1; until then it reports unsupported so the interface is
-// satisfied everywhere.
+// Deploy installs an artifact into the Firecracker guest through the guest
+// agent, which replaces the service binary or configuration and optionally
+// restarts that service.
 func (a *Adapter) Deploy(ctx context.Context, sessionID string, art runtime.Artifact, restart bool) (*runtime.Instance, error) {
 	machine, err := a.machine(sessionID)
 	if err != nil {

@@ -185,8 +185,8 @@ func (a *API) Start(ctx context.Context) error {
 	return a.put(ctx, "/actions", InstanceAction{ActionType: "InstanceStart"})
 }
 
-// InstanceInfo is the subset of GET /machine-config and instance state the
-// adapter needs to confirm a VM came up.
+// InstanceInfo is the subset of GET / that the adapter needs to confirm a VM
+// came up.
 type InstanceInfo struct {
 	State string `json:"state"`
 }
@@ -196,7 +196,7 @@ func (a *API) Describe(ctx context.Context) (InstanceInfo, error) {
 	var info struct {
 		State string `json:"state"`
 	}
-	if err := a.get(ctx, "/instance", &info); err != nil {
+	if err := a.get(ctx, "/", &info); err != nil {
 		return InstanceInfo{}, err
 	}
 	return InstanceInfo{State: info.State}, nil

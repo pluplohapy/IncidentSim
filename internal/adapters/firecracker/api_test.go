@@ -60,6 +60,10 @@ func (f *apiFake) handle(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	f.bodies[r.Method+" "+r.URL.Path] = body
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet && r.URL.Path == "/" {
+		_, _ = w.Write([]byte(`{"state":"Running"}`))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -126,6 +130,20 @@ func TestAPIStartsTheVM(t *testing.T) {
 	}
 }
 
+func TestAPIDescribeUsesInstanceRootEndpoint(t *testing.T) {
+	fake, api := newAPIFake(t)
+	info, err := api.Describe(context.Background())
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if info.State != "Running" {
+		t.Fatalf("state = %q, want Running", info.State)
+	}
+	if !fake.seen("GET /") || fake.seen("GET /instance") {
+		t.Fatalf("describe requests = %v", fake.requests)
+	}
+}
+
 func TestAPISnapshotCreateAndLoad(t *testing.T) {
 	fake, api := newAPIFake(t)
 	ctx := context.Background()
@@ -152,7 +170,7 @@ func TestAPIBootArgsCarryTheAgentPort(t *testing.T) {
 	adapter := New(Config{KernelImage: "/vmlinux", GuestAgentPort: 51000})
 	machine := &vm{id: "task-1"}
 	args := adapter.bootArgs(machine)
-	for _, want := range []string{"root=/dev/vda", "console=ttyS0", "incidentsim.agent_port=51000"} {
+	for _, want := range []string{"root=/dev/vda", "console=ttyS0", "ip=", "eth0:off", "incidentsim.agent_port=51000"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("boot args %q missing %q", args, want)
 		}

@@ -92,6 +92,26 @@
         - "{{ incidentsim_vm_dir }}"
       tags: [firecracker]
 
+    - name: Export the workload rootfs layer
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          image="incidentsim/workload:dev"
+          name="$(echo "$image" | sed 's#/#_#g; s#:#-#g; s#@#_#g')"
+          target="{{ incidentsim_rootfs_dir }}/${name}.squashfs"
+          if [ -f "$target" ]; then
+            exit 0
+          fi
+          container="$(docker create "$image")"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker export "$container" -o "/tmp/${name}.tar"
+          mksquashfs "/tmp/${name}.tar" "$target" -noappend
+          rm -f "/tmp/${name}.tar"
+        executable: /bin/bash
+      args:
+        creates: "{{ incidentsim_rootfs_dir }}/incidentsim_workload-dev.squashfs"
+      tags: [rootfs]
+
     - name: Download the guest kernel
       ansible.builtin.get_url:
         url: "{{ incidentsim_kernel_url }}"

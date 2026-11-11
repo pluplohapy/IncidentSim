@@ -486,7 +486,11 @@ func (a *Adapter) buildBinaryImage(ctx context.Context, project *session, art ru
 		return "", fmt.Errorf("write Dockerfile: %w", err)
 	}
 	tag := fmt.Sprintf("incidentsim/workload:session-%s", project.id)
-	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/"+arch, "-t", tag, dir)
+	docker := project.client.Docker
+	if docker == "" {
+		docker = a.Docker
+	}
+	cmd := exec.CommandContext(ctx, docker, "build", "--platform", "linux/"+arch, "-t", tag, dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -525,6 +529,9 @@ func (a *Adapter) endpointsAnswer(ctx context.Context, project *session) bool {
 		if endpoint == "" {
 			if debugPorts {
 				log.Printf("compose: no endpoint for service %s yet", service.Name)
+			}
+			if len(service.Ports) > 0 {
+				return false
 			}
 			continue
 		}

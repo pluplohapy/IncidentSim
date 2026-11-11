@@ -54,24 +54,3 @@
     state: present
     reload: true
   tags: [network]
-
-- name: Export the workload rootfs layers from the task images
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      image="$1"
-      name="$(echo "$image" | tr '/:' '__')"
-      target="{{ incidentsim_rootfs_dir }}/${name}.squashfs"
-      if [ -f "$target" ]; then
-        echo "rootfs ${name}.squashfs already present"
-        exit 0
-      fi
-      container="$(docker create "$image")"
-      trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-      docker export "$container" -o "/tmp/${name}.tar"
-      mksquashfs "/tmp/${name}.tar" "$target" -noappend
-      rm -f "/tmp/${name}.tar"
-    executable: /bin/bash
-  args:
-    - "incidentsim/workload:dev"
-  tags: [rootfs]
