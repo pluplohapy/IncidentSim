@@ -156,7 +156,7 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", os.Getenv("INCIDENTSIM_CONFIG"), "путь к incidentsim.yaml")
 	addr := fs.String("addr", "", "адрес сервера (переопределяет конфиг)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	config, err := core.LoadConfig(*configPath)
@@ -234,7 +234,7 @@ func sessionID(sessionFlag string, positional []string) (string, error) {
 
 func showCmd(args []string) error {
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	c := client(nil)
@@ -247,7 +247,7 @@ func showCmd(args []string) error {
 func listCmd(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	ids := fs.Bool("ids", false, "вывести только идентификаторы задач")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -273,7 +273,7 @@ func listCmd(args []string) error {
 
 func startCmd(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	task, err := taskIDArg(fs.Args())
@@ -291,7 +291,7 @@ func startCmd(args []string) error {
 func statusCmd(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -325,7 +325,7 @@ func logsCmd(args []string) error {
 	grep := fs.String("grep", "", "фильтр строк")
 	tail := fs.Int("tail", 200, "количество строк")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -339,7 +339,7 @@ func metricsCmd(args []string) error {
 	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
 	service := fs.String("service", "", "сервис")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -353,7 +353,7 @@ func envCmd(args []string) error {
 	fs := flag.NewFlagSet("env", flag.ExitOnError)
 	service := fs.String("service", "", "сервис")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -368,7 +368,9 @@ func execCmd(args []string) error {
 	service := fs.String("service", "", "сервис")
 	tty := fs.Bool("tty", false, "выделить терминал")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	fs.String("sql", "", "SQL statement")
+	flagArgs, command := splitFlagArgs(args)
+	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -380,7 +382,9 @@ func execCmd(args []string) error {
 	if statement != "" {
 		return c.ExecSQL(context.Background(), id, *service, statement)
 	}
-	command := commandAfterSeparator(fs.Args())
+	if len(command) == 0 {
+		command = commandAfterSeparator(fs.Args())
+	}
 	if len(command) == 0 {
 		return fmt.Errorf("a command is required: incidentsim exec <session> --service app -- sh -c '...'")
 	}
@@ -401,14 +405,18 @@ func sqlCmd(args []string) error {
 	fs := flag.NewFlagSet("sql", flag.ExitOnError)
 	service := fs.String("service", "db", "сервис БД")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
 	if err != nil {
 		return err
 	}
-	statement := strings.Join(fs.Args(), " ")
+	statementArgs := fs.Args()
+	if *sessionFlag == "__unset__" && len(statementArgs) > 0 {
+		statementArgs = statementArgs[1:]
+	}
+	statement := strings.Join(statementArgs, " ")
 	if statement == "" {
 		return fmt.Errorf("a statement is required: incidentsim sql <session> --service db 'SELECT 1'")
 	}
@@ -419,7 +427,7 @@ func shellCmd(args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	service := fs.String("service", "app", "сервис")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -432,7 +440,7 @@ func shellCmd(args []string) error {
 func editCmd(args []string) error {
 	fs := flag.NewFlagSet("edit", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -440,8 +448,12 @@ func editCmd(args []string) error {
 		return err
 	}
 	var file string
-	if fs.NArg() > 1 {
-		file = fs.Arg(1)
+	fileArgs := fs.Args()
+	if *sessionFlag == "__unset__" && len(fileArgs) > 0 {
+		fileArgs = fileArgs[1:]
+	}
+	if len(fileArgs) > 0 {
+		file = fileArgs[0]
 	}
 	return client(nil).Edit(context.Background(), id, file)
 }
@@ -449,7 +461,7 @@ func editCmd(args []string) error {
 func diffCmd(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -464,7 +476,12 @@ func applyCmd(args []string) error {
 	service := fs.String("service", "", "сервис")
 	noRestart := fs.Bool("no-restart", false, "не перезапускать сервис после применения")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	fs.String("sql", "", "SQL statement (use incidentsim sql for participant fixes)")
+	fs.String("set", "", "internal compatibility flag")
+	fs.String("file", "", "internal compatibility flag")
+	fs.String("content", "", "internal compatibility flag")
+	fs.String("file-from-reference", "", "internal compatibility flag")
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -501,7 +518,7 @@ func applyCmd(args []string) error {
 func verifyCmd(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -515,7 +532,7 @@ func hintCmd(args []string) error {
 	fs := flag.NewFlagSet("hint", flag.ExitOnError)
 	level := fs.Int("level", 0, "уровень подсказки")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -528,7 +545,7 @@ func hintCmd(args []string) error {
 func resetCmd(args []string) error {
 	fs := flag.NewFlagSet("reset", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -541,7 +558,7 @@ func resetCmd(args []string) error {
 func giveUpCmd(args []string) error {
 	fs := flag.NewFlagSet("give-up", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -554,7 +571,7 @@ func giveUpCmd(args []string) error {
 func revealCmd(args []string) error {
 	fs := flag.NewFlagSet("reveal", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -570,7 +587,7 @@ func postmortemCmd(args []string) error {
 	fs := flag.NewFlagSet("postmortem", flag.ExitOnError)
 	markdown := fs.Bool("md", false, "вывод в формате markdown")
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -583,7 +600,7 @@ func postmortemCmd(args []string) error {
 func stopCmd(args []string) error {
 	fs := flag.NewFlagSet("stop", flag.ExitOnError)
 	sessionFlag := fs.String("session", "__unset__", "id сессии")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	id, err := sessionID(*sessionFlag, fs.Args())
@@ -641,7 +658,7 @@ func validateCmd(args []string) error {
 func selfcheckCmd(args []string) error {
 	fs := flag.NewFlagSet("selfcheck", flag.ExitOnError)
 	engine := fs.String("engine", "compose", "движок selfcheck: compose или firecracker")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args); err != nil {
 		return err
 	}
 	task, err := taskIDArg(fs.Args())
@@ -749,6 +766,51 @@ func commandAfterSeparator(args []string) []string {
 		}
 	}
 	return nil
+}
+
+// parseFlagSet keeps the standard flag package while accepting the CLI shape
+// used by the documentation: `command <id> --service app`. The standard
+// package stops parsing at the first positional argument, so positional values
+// are moved behind an explicit `--` before Parse. A command after `--` is
+// returned separately for exec/shell-style commands.
+func parseFlagSet(fs *flag.FlagSet, args []string) error {
+	flagArgs, _ := splitFlagArgs(args)
+	return fs.Parse(flagArgs)
+}
+
+func splitFlagArgs(args []string) ([]string, []string) {
+	boolFlags := map[string]bool{
+		"--ids":        true,
+		"--tty":        true,
+		"--no-restart": true,
+		"--md":         true,
+	}
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return appendPositional(flags, positional), append([]string(nil), args[i+1:]...)
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		if !strings.Contains(arg, "=") && !boolFlags[arg] && i+1 < len(args) && args[i+1] != "--" && !strings.HasPrefix(args[i+1], "-") {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return appendPositional(flags, positional), nil
+}
+
+func appendPositional(flags, positional []string) []string {
+	if len(positional) == 0 {
+		return flags
+	}
+	out := append([]string(nil), flags...)
+	out = append(out, "--")
+	return append(out, positional...)
 }
 
 // taskReferenceDir resolves the reference directory of a session's task.

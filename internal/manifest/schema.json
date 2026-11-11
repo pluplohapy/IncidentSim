@@ -185,7 +185,8 @@
         "agg": { "enum": ["max", "min", "avg", "last", "p95", "slope", "delta", "resets"] },
         "window": { "$ref": "#/$defs/window" },
         "absent": { "type": "boolean" },
-        "field": { "type": "string" }
+        "field": { "type": "string" },
+        "class": { "type": "string" }
       },
       "allOf": [
         {

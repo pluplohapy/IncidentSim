@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -273,12 +272,7 @@ func verifyOnce(ctx context.Context, api *cli.Client, sessionID string) (*verifi
 
 // applyReference applies the reference solution based on task level.
 func applyReference(ctx context.Context, api *cli.Client, sessionID string, task *taskDetail) error {
-	projectRoot := os.Getenv("INCIDENTSIM_PROJECT_ROOT")
-	if projectRoot == "" {
-		projectRoot = "."
-	}
-	referenceDir := referenceDirFor(projectRoot, *task)
-	return applyReferenceFix(api, sessionID, *task, referenceDir)
+	return applyReferenceFix(ctx, api, sessionID, *task)
 }
 
 // applyDistractor applies a distractor via the data-driven API.
@@ -301,11 +295,12 @@ func failedCheckIDs(results []verifier.Result) []string {
 // taskDetail mirrors cli.taskDetail but is defined here to avoid importing cli
 // internals (the admin endpoint returns the same shape).
 type taskDetail struct {
-	ID          string             `json:"id"`
-	Level       string             `json:"level"`
-	Editable    []string           `json:"editable,omitempty"`
-	Reference   string             `json:"reference,omitempty"`
-	Distractors []distractorDetail `json:"distractors,omitempty"`
+	ID             string             `json:"id"`
+	Level          string             `json:"level"`
+	Editable       []string           `json:"editable,omitempty"`
+	Reference      string             `json:"reference,omitempty"`
+	ReferenceFiles map[string]string  `json:"reference_files,omitempty"`
+	Distractors    []distractorDetail `json:"distractors,omitempty"`
 }
 
 type distractorDetail struct {
@@ -323,18 +318,10 @@ type distractorDetail struct {
 	} `json:"apply,omitempty"`
 }
 
-// referenceDirFor resolves the reference directory from the task detail.
-func referenceDirFor(projectRoot string, task taskDetail) string {
-	if task.Reference != "" {
-		return projectRoot + "/" + task.Reference
-	}
-	return projectRoot + "/scenarios/" + task.ID + "/reference"
-}
-
 // applyReferenceFix applies the reference solution based on task level.
 // This duplicates the logic in cmd/incidentsim.main.go but lives here so the
 // selfcheck package has no dependency on the CLI binary.
-func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, referenceDir string) error {
+func applyReferenceFix(ctx context.Context, api *cli.Client, sessionID string, task taskDetail) error {
 	service := "app"
 	switch task.Level {
 	case "code":
@@ -342,28 +329,28 @@ func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, refer
 			return fmt.Errorf("code-level task %q has no editable files", task.ID)
 		}
 		refPath := task.Editable[0]
-		content, err := readReferenceFile(referenceDir, refPath)
-		if err != nil {
-			return fmt.Errorf("read reference %s: %w", refPath, err)
+		content, ok := task.ReferenceFiles[refPath]
+		if !ok {
+			return fmt.Errorf("admin endpoint did not return reference %s", refPath)
 		}
-		return api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true)
+		return api.Apply(ctx, sessionID, service, nil, map[string]string{refPath: content}, true)
 	case "config":
 		if len(task.Editable) == 0 {
 			return fmt.Errorf("config-level task %q has no editable files", task.ID)
 		}
 		refPath := task.Editable[0]
-		content, err := readReferenceFile(referenceDir, refPath)
-		if err != nil {
-			return fmt.Errorf("read reference %s: %w", refPath, err)
+		content, ok := task.ReferenceFiles[refPath]
+		if !ok {
+			return fmt.Errorf("admin endpoint did not return reference %s", refPath)
 		}
-		return api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true)
+		return api.Apply(ctx, sessionID, service, nil, map[string]string{refPath: content}, true)
 	case "db":
-		content, err := readReferenceFile(referenceDir, "solution.sql")
-		if err != nil {
-			return fmt.Errorf("read reference solution.sql: %w", err)
+		content, ok := task.ReferenceFiles["solution.sql"]
+		if !ok {
+			return fmt.Errorf("admin endpoint did not return reference solution.sql")
 		}
 		for _, stmt := range splitSQLStatements(content) {
-			if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
+			if err := api.ExecSQL(ctx, sessionID, "db", stmt); err != nil {
 				return fmt.Errorf("apply reference statement %q: %w", stmt, err)
 			}
 		}
@@ -373,17 +360,17 @@ func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, refer
 			return fmt.Errorf("composite-level task %q has no editable files", task.ID)
 		}
 		for _, refPath := range task.Editable {
-			content, err := readReferenceFile(referenceDir, refPath)
-			if err != nil {
-				return fmt.Errorf("read reference %s: %w", refPath, err)
+			content, ok := task.ReferenceFiles[refPath]
+			if !ok {
+				return fmt.Errorf("admin endpoint did not return reference %s", refPath)
 			}
-			if err := api.Apply(context.Background(), sessionID, service, nil, map[string]string{refPath: content}, true); err != nil {
+			if err := api.Apply(ctx, sessionID, service, nil, map[string]string{refPath: content}, true); err != nil {
 				return err
 			}
 		}
-		if content, err := readReferenceFile(referenceDir, "solution.sql"); err == nil {
+		if content, ok := task.ReferenceFiles["solution.sql"]; ok {
 			for _, stmt := range splitSQLStatements(content) {
-				if err := api.ExecSQL(context.Background(), sessionID, "db", stmt); err != nil {
+				if err := api.ExecSQL(ctx, sessionID, "db", stmt); err != nil {
 					return fmt.Errorf("apply reference statement %q: %w", stmt, err)
 				}
 			}
@@ -392,15 +379,6 @@ func applyReferenceFix(api *cli.Client, sessionID string, task taskDetail, refer
 	default:
 		return fmt.Errorf("unknown level %q", task.Level)
 	}
-}
-
-// readReferenceFile reads a file from the reference directory.
-func readReferenceFile(referenceDir, refPath string) (string, error) {
-	data, err := os.ReadFile(referenceDir + "/" + refPath)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 // splitSQLStatements splits a reference .sql file into individual statements.

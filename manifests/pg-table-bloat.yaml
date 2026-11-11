@@ -7,6 +7,8 @@ metadata:
   tags: [postgres, vacuum, bloat]
   estimated_minutes: 35
 spec:
+  workspace: scenarios/pg-table-bloat/workspace
+  reference: scenarios/pg-table-bloat/reference
   runtime:
     engine: compose
     memory_mib: 2048
@@ -16,7 +18,6 @@ spec:
       env:
         POSTGRES_PASSWORD: incidentsim
         POSTGRES_DB: orders
-      ports: [5432]
     - name: app
       image: incidentsim/workload:dev
       env:

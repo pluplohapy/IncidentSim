@@ -165,9 +165,9 @@ func (m *Manifest) validateStructure() []Issue {
 		issues = append(issues, Issue{Field: "metadata.level", Message: fmt.Sprintf("must be one of config, code, db, composite")})
 	}
 	switch m.Spec.Runtime.Engine {
-	case "compose", "":
+	case "compose", "firecracker", "":
 	default:
-		issues = append(issues, Issue{Field: "spec.runtime.engine", Message: "must be compose"})
+		issues = append(issues, Issue{Field: "spec.runtime.engine", Message: "must be compose or firecracker"})
 	}
 	return issues
 }
@@ -316,6 +316,15 @@ func validateCheck(field string, check Check, services []string, gate string) []
 	case CheckExec:
 		if len(check.Command) == 0 {
 			issues = append(issues, Issue{Field: field, Message: "exec check requires command"})
+		}
+	case CheckReplay:
+		switch check.Field {
+		case "error_rate", "success_rate", "p99_ms", "rps", "errors_reset":
+		default:
+			issues = append(issues, Issue{Field: field + ".field", Message: "replay check field must be error_rate, success_rate, p99_ms, rps or errors_reset"})
+		}
+		if check.Expect == nil || (check.Expect.Min == nil && check.Expect.Max == nil) {
+			issues = append(issues, Issue{Field: field + ".expect", Message: "replay check requires expect.min or expect.max"})
 		}
 	default:
 		issues = append(issues, Issue{Field: field + ".type", Message: "unknown check type"})

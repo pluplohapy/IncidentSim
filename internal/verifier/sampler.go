@@ -186,7 +186,10 @@ func (s *Sampler) Aggregate(name string, agg Agg, window Window) (float64, bool,
 	if window.From != "" {
 		d, err := time.ParseDuration(window.From)
 		if err == nil {
-			cutoff := s.Now().Add(-d)
+			// Use the end of the captured series rather than wall clock. This
+			// keeps the aggregate correct with an injected clock and makes the
+			// window mean "last replay duration minus warmup".
+			cutoff := pts[len(pts)-1].At.Add(-d)
 			for i := len(pts) - 1; i >= 0; i-- {
 				if pts[i].At.Before(cutoff) {
 					start = i + 1

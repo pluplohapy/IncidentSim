@@ -151,9 +151,11 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 	cleanup := func() {
 		_ = adapter.Down(ctx, sessionID)
 		_ = o.removeSessionImage(ctx, sessionID)
-		if session.WorkspaceDir != "" {
-			_ = os.RemoveAll(session.WorkspaceDir)
-		}
+		// WorkspaceDir is assigned only after the copy completes. Remove the
+		// deterministic session root as well, so a failed copy cannot leave a
+		// half-populated workspace behind.
+		workspace, _ := o.workspaceDir(sessionID)
+		_ = os.RemoveAll(filepath.Dir(workspace))
 		o.Sessions.Remove(sessionID)
 	}
 
@@ -648,6 +650,33 @@ func (o *Orchestrator) applyFromWorkspace(ctx context.Context, session *Session,
 			session.journal.Record(EventFixFailed, "statement failed", map[string]any{"error": err.Error()})
 			return fmt.Errorf("sql: %w", err)
 		}
+	case manifest.LevelComposite:
+		// Composite tasks may combine a config fix with a database operation.
+		// The SQL part travels through exec/sql; the workspace part is deployed
+		// exactly like a config task when the participant edits config files.
+		if len(patch.Command) > 0 {
+			if _, err := adapter.Exec(ctx, session.ID, runtime.ExecRequest{
+				Service: patch.Service,
+				Command: patch.Command,
+			}); err != nil {
+				session.journal.Record(EventFixFailed, "statement failed", map[string]any{"error": err.Error()})
+				return fmt.Errorf("sql: %w", err)
+			}
+			break
+		}
+		artifact, err := o.configArtifact(session)
+		if err != nil {
+			return fmt.Errorf("config artifact: %w", err)
+		}
+		instance, err := adapter.Deploy(ctx, session.ID, artifact, true)
+		if err != nil {
+			session.journal.Record(EventFixFailed, "deploy failed", map[string]any{"error": err.Error()})
+			return fmt.Errorf("deploy: %w", err)
+		}
+		o.refreshInstance(session, instance)
+		if err := o.waitForHealth(ctx, session, adapter); err != nil {
+			return fmt.Errorf("service not healthy after deploy: %w", err)
+		}
 	default:
 		return fmt.Errorf("unsupported level %q for apply", session.manifest.Metadata.Level)
 	}
@@ -696,6 +725,11 @@ func (o *Orchestrator) configArtifact(session *Session) (runtime.Artifact, error
 // check id the distractor masks (Fails) so the selfcheck can assert exactly
 // that check dropped to partial_fix.
 func (o *Orchestrator) ApplyDistractor(ctx context.Context, sessionID string, d *manifest.Distractor) (string, error) {
+	if err := o.beginOp(sessionID); err != nil {
+		return "", err
+	}
+	defer o.endOp(sessionID)
+
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return "", err
@@ -1036,6 +1070,11 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 			downErr = fmt.Errorf("remove workspace: %w", rerr)
 		}
 	}
+	if workspace, werr := o.workspaceDir(sessionID); werr == nil {
+		if rerr := os.RemoveAll(filepath.Dir(workspace)); rerr != nil && downErr == nil {
+			downErr = fmt.Errorf("remove session workspace: %w", rerr)
+		}
+	}
 	// A code-level task baked a session image; drop it on teardown.
 	if session.manifest != nil && session.manifest.Metadata.Level == manifest.LevelCode {
 		if rerr := o.removeSessionImage(ctx, sessionID); rerr != nil && downErr == nil {
@@ -1202,6 +1241,7 @@ func (o *Orchestrator) setupWorkspace(session *Session) error {
 		return os.WriteFile(target, data, 0o644)
 	})
 	if err != nil {
+		_ = os.RemoveAll(filepath.Dir(dst))
 		return fmt.Errorf("copy workspace: %w", err)
 	}
 	session.mu.Lock()

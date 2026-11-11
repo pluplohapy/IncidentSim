@@ -89,6 +89,8 @@ type Check struct {
 	Absent bool `json:"absent,omitempty"`
 	// Field is for replay checks: error_rate|success_rate|p99_ms|rps|errors_reset.
 	Field string `json:"field,omitempty"`
+	// Class narrows a replay check to one workload request class.
+	Class string `json:"class,omitempty"`
 }
 
 // Window is the observation slice of a replay. From skips the warmup.

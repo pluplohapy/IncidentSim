@@ -3,10 +3,12 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -103,18 +105,55 @@ func (s *Server) handleAdminTaskDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error(), "")
 		return
 	}
+	referenceFiles := readTaskFiles(s.Orchestrator.Config.ProjectDir(), task.Spec.Reference)
+	distractorMaterials := map[string]map[string]string{}
+	for _, distractor := range task.Spec.Distractors {
+		if distractor.Apply == nil || distractor.Apply.From == "" {
+			continue
+		}
+		path := filepath.Join(s.Orchestrator.Config.ProjectDir(), "scenarios", task.Metadata.ID, "distractors", distractor.ID, distractor.Apply.From)
+		if data, err := os.ReadFile(path); err == nil {
+			distractorMaterials[distractor.ID] = map[string]string{distractor.Apply.From: string(data)}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":                 task.Metadata.ID,
-		"title":              task.Metadata.Title,
-		"level":              task.Metadata.Level,
-		"symptoms":           task.Spec.Symptoms,
-		"editable":           task.Spec.Editable,
-		"root_cause":         task.Spec.RootCause.Summary,
-		"theory":             task.Spec.Theory,
-		"reference":          task.Spec.Reference,
-		"reference_solution": task.Spec.ReferenceSolution,
-		"distractors":        task.Spec.Distractors,
+		"id":                   task.Metadata.ID,
+		"title":                task.Metadata.Title,
+		"level":                task.Metadata.Level,
+		"symptoms":             task.Spec.Symptoms,
+		"editable":             task.Spec.Editable,
+		"root_cause":           task.Spec.RootCause.Summary,
+		"theory":               task.Spec.Theory,
+		"reference":            task.Spec.Reference,
+		"reference_solution":   task.Spec.ReferenceSolution,
+		"distractors":          task.Spec.Distractors,
+		"reference_files":      referenceFiles,
+		"distractor_materials": distractorMaterials,
 	})
+}
+
+func readTaskFiles(projectRoot, relativeDir string) map[string]string {
+	files := map[string]string{}
+	if relativeDir == "" {
+		return files
+	}
+	root := filepath.Join(projectRoot, relativeDir)
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	return files
 }
 
 func (s *Server) adminEnabled() bool {
@@ -319,7 +358,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 		}
 	}
 	if err := apply(r.Context(), session.ID, patch); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "")
+		writeOperationError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"applied": patch})
@@ -387,7 +426,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request, session *S
 	}
 	report, err := s.Orchestrator.Verify(r.Context(), session.ID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "")
+		writeOperationError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
@@ -399,7 +438,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request, session *Se
 		return
 	}
 	if err := s.Orchestrator.Reset(r.Context(), session.ID); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "")
+		writeOperationError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
@@ -511,7 +550,7 @@ func (s *Server) handleDistractor(w http.ResponseWriter, r *http.Request, sessio
 	}
 	failsCheck, err := s.Orchestrator.ApplyDistractor(r.Context(), session.ID, d)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "")
+		writeOperationError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"distractor": body.DistractorID, "fails_check": failsCheck})
@@ -536,7 +575,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request, session *Ses
 		return
 	}
 	if err := s.Orchestrator.Stop(r.Context(), session.ID); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "")
+		writeOperationError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stopped": true})
@@ -551,6 +590,14 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message, details string) {
 	writeJSON(w, status, apiError{Error: message, Details: details})
+}
+
+func writeOperationError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	if errors.Is(err, ErrOperationInProgress) {
+		status = http.StatusConflict
+	}
+	writeError(w, status, err.Error(), "")
 }
 
 func decodeJSON(r *http.Request, target any) error {

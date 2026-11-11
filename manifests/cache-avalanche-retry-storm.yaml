@@ -18,7 +18,6 @@ spec:
       env:
         POSTGRES_PASSWORD: incidentsim
         POSTGRES_DB: orders
-      ports: [5432]
     - name: app
       image: incidentsim/workload:dev
       env:

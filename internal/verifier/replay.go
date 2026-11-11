@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,9 +50,12 @@ type ReplayResult struct {
 	LatencyP99 time.Duration `json:"latency_p99"`
 	Duration   time.Duration `json:"duration"`
 	RPS        float64       `json:"rps"`
-	// ErrorsByClass counts client errors by class: refused, reset, timeout,
-	// http_5xx.
-	ErrorsByClass map[string]int `json:"errors_by_class,omitempty"`
+	// ErrorsByClass counts errors by workload request class. ErrorTypesByClass
+	// keeps the transport classification (refused/reset/timeout/http_5xx).
+	ErrorsByClass     map[string]int            `json:"errors_by_class,omitempty"`
+	RequestsByClass   map[string]int            `json:"requests_by_class,omitempty"`
+	ErrorTypesByClass map[string]map[string]int `json:"error_types_by_class,omitempty"`
+	LatencyP99ByClass map[string]time.Duration  `json:"latency_p99_by_class,omitempty"`
 }
 
 // Passed reports whether the replayed load stayed within the expected error
@@ -124,14 +128,17 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 
 	deadline := now().Add(duration)
 	var (
-		count       atomic.Int64
-		failures    atomic.Int64
-		latencies   []time.Duration
-		latMu       sync.Mutex
-		wg          sync.WaitGroup
-		inFlight    atomic.Int64
-		errorsByCls = map[string]int{}
-		clsMu       sync.Mutex
+		count           atomic.Int64
+		failures        atomic.Int64
+		latencies       []time.Duration
+		latMu           sync.Mutex
+		wg              sync.WaitGroup
+		inFlight        atomic.Int64
+		requestsByCls   = map[string]int{}
+		errorsByCls     = map[string]int{}
+		errorTypesByCls = map[string]map[string]int{}
+		latenciesByCls  = map[string][]time.Duration{}
+		clsMu           sync.Mutex
 	)
 	concurrency := config.Concurrency
 	if concurrency <= 0 {
@@ -165,39 +172,61 @@ func (r *ReplayRunner) Replay(ctx context.Context, endpoint string, requests []R
 			if class == "" {
 				class = classFromPath(request.Path)
 			}
+			clsMu.Lock()
+			requestsByCls[class]++
+			clsMu.Unlock()
 			if sample.err != nil {
 				failures.Add(1)
 				clsMu.Lock()
-				errorsByCls[classifyClientError(sample.err)]++
+				errorsByCls[class]++
+				if errorTypesByCls[class] == nil {
+					errorTypesByCls[class] = map[string]int{}
+				}
+				errorTypesByCls[class][classifyClientError(sample.err)]++
 				clsMu.Unlock()
 				return
 			}
 			if !sample.ok {
 				failures.Add(1)
 				clsMu.Lock()
-				errorsByCls[class+"_http_5xx"]++
+				errorsByCls[class]++
+				if errorTypesByCls[class] == nil {
+					errorTypesByCls[class] = map[string]int{}
+				}
+				errorType := "other"
+				if sample.status >= 500 {
+					errorType = "http_5xx"
+				}
+				errorTypesByCls[class][errorType]++
 				clsMu.Unlock()
 				return
 			}
 			count.Add(1)
 			latMu.Lock()
 			latencies = append(latencies, sample.latency)
+			latenciesByCls[class] = append(latenciesByCls[class], sample.latency)
 			latMu.Unlock()
 		}(req)
 	}
 	wg.Wait()
 
 	result := ReplayResult{
-		Requests:      int(count.Load()),
-		Errors:        int(failures.Load()),
-		Duration:      duration,
-		ErrorsByClass: errorsByCls,
+		Requests:          int(count.Load()),
+		Errors:            int(failures.Load()),
+		Duration:          duration,
+		ErrorsByClass:     errorsByCls,
+		RequestsByClass:   requestsByCls,
+		ErrorTypesByClass: errorTypesByCls,
+		LatencyP99ByClass: map[string]time.Duration{},
 	}
 	if result.Requests+result.Errors > 0 {
 		result.RPS = float64(result.Requests+result.Errors) / duration.Seconds()
 	}
 	result.LatencyP50 = percentile(latencies, 50)
 	result.LatencyP99 = percentile(latencies, 99)
+	for class, values := range latenciesByCls {
+		result.LatencyP99ByClass[class] = percentile(values, 99)
+	}
 	return result, nil
 }
 
@@ -359,11 +388,7 @@ func percentile(samples []time.Duration, p int) time.Duration {
 		return 0
 	}
 	sorted := append([]time.Duration(nil), samples...)
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	index := (len(sorted) - 1) * p / 100
 	return sorted[index]
 }

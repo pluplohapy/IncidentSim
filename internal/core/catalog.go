@@ -164,6 +164,7 @@ func projectChecks(checks []manifest.Check, gate verifier.Gate) []verifier.Check
 			Window:   projectWindow(check.Window),
 			Absent:   check.Absent,
 			Field:    check.Field,
+			Class:    check.Class,
 		})
 	}
 	return out

@@ -94,11 +94,11 @@ func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionI
 		target = replayTarget(instance, checks)
 	}
 	replayCtx, cancelReplay := context.WithCancel(ctx)
-	if target != "" {
+	if target != "" && checks.Replay != nil && checks.Replay.Duration != "" {
 		go sampler.Start(replayCtx, target, checks.ReplayTargetService())
 	}
 	replayResult := v.runReplay(replayCtx, env, checks)
-	if target != "" {
+	if target != "" && checks.Replay != nil && checks.Replay.Duration != "" {
 		sampler.Stop()
 	}
 	cancelReplay()
@@ -620,23 +620,35 @@ func (v *ManifestVerifier) checkReplay(ctx context.Context, env Environment, che
 		return fail(result, "replay check requires a field: error_rate|success_rate|p99_ms|rps|errors_reset")
 	}
 	var value float64
+	class := check.Class
+	total := replayResult.Requests + replayResult.Errors
+	errors := replayResult.Errors
+	if class != "" {
+		total = replayResult.RequestsByClass[class]
+		errors = replayResult.ErrorsByClass[class]
+	}
 	switch check.Field {
 	case "error_rate":
-		total := replayResult.Requests + replayResult.Errors
 		if total > 0 {
-			value = float64(replayResult.Errors) / float64(total)
+			value = float64(errors) / float64(total)
 		}
 	case "success_rate":
-		total := replayResult.Requests + replayResult.Errors
 		if total > 0 {
-			value = float64(replayResult.Requests) / float64(total)
+			value = float64(total-errors) / float64(total)
 		}
 	case "p99_ms":
-		value = float64(replayResult.LatencyP99.Nanoseconds()) / 1e6
+		latency := replayResult.LatencyP99
+		if class != "" {
+			latency = replayResult.LatencyP99ByClass[class]
+		}
+		value = float64(latency.Nanoseconds()) / 1e6
 	case "rps":
 		value = replayResult.RPS
+		if class != "" && replayResult.Duration > 0 {
+			value = float64(total) / replayResult.Duration.Seconds()
+		}
 	case "errors_reset":
-		value = float64(replayResult.Errors)
+		value = float64(errors)
 	default:
 		return fail(result, fmt.Sprintf("unknown replay field %q", check.Field))
 	}
