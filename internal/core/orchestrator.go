@@ -468,18 +468,23 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 
 // Apply pushes a participant fix into the environment.
 //
-// Two paths:
-//
-//   - patch.Files set: the internal --file/--content API. Files are written
-//     into the session workspace, then the workspace is deployed exactly as
-//     the no-files path below.
-//   - patch.Files empty: `incidentsim apply <session>` picks up the current
-//     state of the session workspace, validates it, builds it (code level) or
-//     deploys it (config/db level), and restarts the service.
+// File changes use ApplyFiles, the internal API bridge. The participant CLI
+// edits the session workspace and calls this method without file contents.
 //
 // A build failure returns the compiler output to the participant and leaves
 // the running environment untouched.
 func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) error {
+	return o.apply(ctx, sessionID, patch, nil)
+}
+
+// ApplyFiles is the server/selfcheck bridge for a file payload. File contents
+// never cross the runtime.Adapter contract: they are written to the session
+// workspace and then go through the same Builder/Deploy path as CLI edits.
+func (o *Orchestrator) ApplyFiles(ctx context.Context, sessionID string, patch runtime.EnvPatch, files map[string]string) error {
+	return o.apply(ctx, sessionID, patch, files)
+}
+
+func (o *Orchestrator) apply(ctx context.Context, sessionID string, patch runtime.EnvPatch, files map[string]string) error {
 	if err := o.beginOp(sessionID); err != nil {
 		return err
 	}
@@ -496,8 +501,8 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 
 	// Write files carried by the patch into the session workspace first.
 	workspaceMode := false
-	if len(patch.Files) > 0 {
-		if err := o.writePatchFiles(session, patch); err != nil {
+	if len(files) > 0 {
+		if err := o.writePatchFiles(session, files); err != nil {
 			return err
 		}
 		workspaceMode = true
@@ -539,8 +544,8 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 // writePatchFiles writes the files carried by a patch into the session
 // workspace, rejecting path traversal and non-editable files before anything
 // is written.
-func (o *Orchestrator) writePatchFiles(session *Session, patch runtime.EnvPatch) error {
-	for relPath := range patch.Files {
+func (o *Orchestrator) writePatchFiles(session *Session, files map[string]string) error {
+	for relPath := range files {
 		if err := validateFilePath(relPath); err != nil {
 			return fmt.Errorf("invalid file path %q: %w", relPath, err)
 		}
@@ -549,12 +554,12 @@ func (o *Orchestrator) writePatchFiles(session *Session, patch runtime.EnvPatch)
 	for _, e := range session.manifest.Spec.Editable {
 		allowed[e] = true
 	}
-	for relPath := range patch.Files {
+	for relPath := range files {
 		if !allowed[relPath] {
 			return fmt.Errorf("file %q is not in editable list %v", relPath, session.manifest.Spec.Editable)
 		}
 	}
-	for relPath, content := range patch.Files {
+	for relPath, content := range files {
 		target := filepath.Join(session.WorkspaceDir, relPath)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("create dir for %s: %w", relPath, err)

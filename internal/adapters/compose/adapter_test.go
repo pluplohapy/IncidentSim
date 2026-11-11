@@ -274,9 +274,8 @@ func TestServiceAnswersProbesHTTPNotJustTCP(t *testing.T) {
 	}
 }
 
-func TestWriteConfigFileWritesToConfigDir(t *testing.T) {
+func TestArtifactFilePathMapsToConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	adapter := New(dir)
 
 	project := &session{
 		id:        "session-1",
@@ -289,24 +288,8 @@ func TestWriteConfigFileWritesToConfigDir(t *testing.T) {
 	}
 	project.client = project.newClient()
 
-	content := "LOG_LEVEL=info\n"
-	if err := adapter.writeConfigFile(project, "app", "config/app.conf", content); err != nil {
-		t.Fatalf("writeConfigFile: %v", err)
-	}
-
-	// The file must be written as config/app.conf, not config/app.conf.conf
 	expectedPath := filepath.Join(dir, "session-1", "config", "app.conf")
-	data, err := os.ReadFile(expectedPath)
-	if err != nil {
-		t.Fatalf("expected file %s not written: %v", expectedPath, err)
-	}
-	if string(data) != content {
-		t.Fatalf("file content = %q, want %q", string(data), content)
-	}
-
-	// The doubled-basename path must not exist
-	wrongPath := filepath.Join(dir, "session-1", "config", "app.conf.conf")
-	if _, err := os.Stat(wrongPath); err == nil {
-		t.Fatalf("unexpected file %s exists", wrongPath)
+	if got := project.artifactFilePath("/etc/app/app.conf"); got != expectedPath {
+		t.Fatalf("artifact path = %q, want %q", got, expectedPath)
 	}
 }

@@ -64,14 +64,6 @@ type EnvPatch struct {
 	// Command is an optional command executed inside the service before
 	// restart, e.g. a SQL statement for db-level tasks.
 	Command []string
-	// Files are written into the container before restart. The path from the
-	// CLI is inside the container (e.g. /etc/app/app.conf); it is mapped to
-	// the host path in the compose project's config directory.
-	Files map[string]string
-	// Image is the new container image tag to use for the service, e.g. after
-	// rebuilding the participant's workspace. When set, the adapter updates
-	// the service image and recreates the container.
-	Image string
 }
 
 // Artifact is a deployable unit produced by a Builder or prepared from the

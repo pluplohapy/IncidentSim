@@ -431,9 +431,6 @@ func (a *Adapter) pauseOrKill(ctx context.Context, machine *vm) error {
 // Apply implements runtime.Adapter: a config change is written to the overlay
 // and the guest agent restarts the service with the new environment.
 func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) (*runtime.Instance, error) {
-	if patch.Image != "" {
-		return nil, fmt.Errorf("%w: image patches are not supported; deploy a binary artifact", runtime.ErrUnsupported)
-	}
 	machine, err := a.machine(sessionID)
 	if err != nil {
 		return nil, err

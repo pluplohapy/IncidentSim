@@ -349,27 +349,6 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 			return nil, fmt.Errorf("sync config file: %w", err)
 		}
 	}
-	// Files are written to the host filesystem inside the compose project
-	// directory: the config file is mounted into the container, so writing it
-	// here and restarting the service is a real fix - the participant edits
-	// the config file on disk, exactly like on a production host.
-	for patchPath, content := range patch.Files {
-		hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(patchPath))
-		if err := a.writeConfigFile(project, patch.Service, hostPath, content); err != nil {
-			return nil, fmt.Errorf("write %s into %s: %w", patchPath, patch.Service, err)
-		}
-	}
-	// If the patch carries a new image tag (e.g. after rebuilding the
-	// participant's workspace), update the service image in the live spec
-	// so the recreated container uses the fixed code.
-	if patch.Image != "" {
-		for i := range project.spec.Services {
-			if project.spec.Services[i].Name == patch.Service {
-				project.spec.Services[i].Image = patch.Image
-				break
-			}
-		}
-	}
 	// The compose file is rewritten before the service is recreated: compose
 	// builds the new container from the file on disk, so writing it afterwards
 	// would recreate the service with the old configuration and the fix would
@@ -602,23 +581,6 @@ var debugPorts = os.Getenv("INCIDENTSIM_DEBUG_PORTS") != ""
 func (a *Adapter) writeComposeFile(project *session) error {
 	document := Project(project.client.ProjectDir, projectName(project.id), project.spec)
 	return os.WriteFile(filepath.Join(project.client.ProjectDir, composeFile), []byte(document), 0o600)
-}
-
-// writeConfigFile writes content into the config file for a service on the
-// host. The file is mounted into the container, so writing it here and
-// restarting the service is a real fix - the participant edits the config file
-// on disk, exactly like on a production host.
-func (a *Adapter) writeConfigFile(project *session, service, path, content string) error {
-	// The path from the CLI is inside the container (e.g. /etc/app/app.conf).
-	// Map it to the host path in the compose project's config directory.
-	hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(path))
-	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(hostPath, []byte(content), 0o600); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (a *Adapter) session(sessionID string) (*session, error) {

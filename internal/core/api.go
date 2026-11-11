@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -310,8 +311,14 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 		writeError(w, http.StatusBadRequest, "vars, files or a restart are required: a fix must change at least something", "")
 		return
 	}
-	patch := runtime.EnvPatch{Service: body.Service, Vars: body.Vars, Restart: restart, Files: body.Files}
-	if err := s.Orchestrator.Apply(r.Context(), session.ID, patch); err != nil {
+	patch := runtime.EnvPatch{Service: body.Service, Vars: body.Vars, Restart: restart}
+	apply := s.Orchestrator.Apply
+	if len(body.Files) > 0 {
+		apply = func(ctx context.Context, id string, p runtime.EnvPatch) error {
+			return s.Orchestrator.ApplyFiles(ctx, id, p, body.Files)
+		}
+	}
+	if err := apply(r.Context(), session.ID, patch); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "")
 		return
 	}

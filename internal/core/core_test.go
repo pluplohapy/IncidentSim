@@ -324,10 +324,10 @@ func TestStopTearsEnvironmentDown(t *testing.T) {
 	}
 }
 
-func TestParseEnvPatchAllowsEmptySetWithFiles(t *testing.T) {
+func TestParseEnvPatchAllowsEmptySet(t *testing.T) {
 	// --set is optional: an empty vars map is a valid patch at this layer.
-	// The caller rejects the fully-empty patch (no --set, --file or
-	// --file-from-reference) before reaching ParseEnvPatch.
+	// The caller rejects a fully empty participant action before reaching
+	// ParseEnvPatch.
 	patch, err := ParseEnvPatch("app", nil, false)
 	if err != nil {
 		t.Fatalf("empty --set list rejected: %v", err)
