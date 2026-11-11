@@ -41,11 +41,11 @@ echo "образ incidentsim/workload:dev собран"
 
 # --- 3. ядро ----------------------------------------------------------------
 say "запуск ядра"
+mkdir -p "$STATE"
 if curl -fsS "http://$ADDR/healthz" >/dev/null 2>&1; then
   echo "ядро уже работает на $ADDR"
 else
   ./bin/incidentsim serve >"$STATE/demo-serve.log" 2>&1 &
-  mkdir -p "$STATE"
   echo $! >"$STATE/demo-serve.pid"
   for _ in $(seq 1 50); do
     curl -fsS "http://$ADDR/healthz" >/dev/null 2>&1 && break
@@ -53,8 +53,6 @@ else
   done
   echo "ядро слушает $ADDR (лог: $STATE/demo-serve.log)"
 fi
-
-session() { ./bin/incidentsim --version >/dev/null; }
 
 # --- 4. задача --------------------------------------------------------------
 say "старт задачи $TASK"

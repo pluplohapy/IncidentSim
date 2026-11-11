@@ -18,7 +18,7 @@ cd "$ROOT"
 OUT="${1:-output.txt}"
 
 # Директории, которые никогда не считаются кодом проекта.
-EXCLUDE_DIRS=(.git .idea .vscode .incidentsim bin build dist vendor node_modules)
+EXCLUDE_DIRS=(.git .idea .vscode .incidentsim bin dist vendor node_modules)
 # Имена файлов, которые исключаются из списка (в т.ч. предыдущий запуск скрипта).
 EXCLUDE_BASENAMES=(output.txt)
 
@@ -34,7 +34,7 @@ is_code_file() {
     esac
 
     case "$f" in
-        *.go|*.sh|*.bash|*.yml|*.yaml|*.json) return 0 ;;
+        *.go|*.sh|*.bash|*.yml|*.yaml|*.json|*.conf|*.sql|*.md) return 0 ;;
     esac
 
     return 1

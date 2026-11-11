@@ -8,11 +8,14 @@ BINARY      := incidentsim
 WORKLOAD    := incidentsim-workload
 GO          := go
 GOFLAGS     ?=
+# VERSION and COMMIT are resolved *before* LDFLAGS uses them: LDFLAGS is
+# expanded immediately (`:=`), so a `?=` below it would stamp an empty
+# version into the binary.
+VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
+COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS     := -s -w \
 	-X incidentsim/internal/version.Version=$(VERSION) \
 	-X incidentsim/internal/version.Commit=$(COMMIT)
-VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
-COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 PKGS        := ./...
 LINT        := golangci-lint
 
@@ -77,7 +80,3 @@ ansible-check: ## Validate the Firecracker playbook without running it
 .PHONY: run-dev
 run-dev: build ## Run the core API against the compose catalog
 	./bin/$(BINARY) serve --config incidentsim.yaml
-
-.PHONY: smoke
-smoke: build ## Exercise one task end to end against the runtime adapter
-	./bin/$(BINARY) demo --task db-connection-leak
