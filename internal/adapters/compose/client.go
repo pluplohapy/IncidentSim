@@ -148,8 +148,19 @@ func (c *Client) Port(ctx context.Context, service string, containerPort int) (s
 }
 
 // Exec runs a command inside a service.
+// Exec runs a captured command inside a service: -T disables the pseudo
+// terminal, which is what makes the output a plain byte stream the caller can
+// read. The interactive variant keeps the terminal, because a shell without
+// one is unusable.
 func (c *Client) Exec(ctx context.Context, service string, command []string) (commandOutput, error) {
 	args := append([]string{"compose", "exec", "-T", service}, command...)
+	return c.run(ctx, args...)
+}
+
+// ExecTerminal runs a command inside a service with a terminal allocated, for
+// an interactive shell over a transport that can carry one.
+func (c *Client) ExecTerminal(ctx context.Context, service string, command []string) (commandOutput, error) {
+	args := append([]string{"compose", "exec", service}, command...)
 	return c.run(ctx, args...)
 }
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +82,10 @@ func (a *Adapter) Up(ctx context.Context, sessionID string, spec runtime.Spec) (
 	if err := os.MkdirAll(project.client.ProjectDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create project dir: %w", err)
 	}
-	document := Project(projectName(sessionID), spec)
+	if err := writeServiceConfig(project.client.ProjectDir, spec); err != nil {
+		return nil, err
+	}
+	document := Project(project.client.ProjectDir, projectName(sessionID), spec)
 	if err := os.WriteFile(filepath.Join(project.client.ProjectDir, composeFile), []byte(document), 0o600); err != nil {
 		return nil, fmt.Errorf("write compose file: %w", err)
 	}
@@ -208,14 +213,21 @@ func (a *Adapter) Down(ctx context.Context, sessionID string) error {
 	return downErr
 }
 
-// Exec implements runtime.Adapter.
+// Exec implements runtime.Adapter. The command is whatever the caller asked
+// for: a shell pipeline for a participant debugging a session, `env` for a
+// policy check, or a client binary for a statement.
 func (a *Adapter) Exec(ctx context.Context, sessionID string, req runtime.ExecRequest) (runtime.ExecResult, error) {
 	project, err := a.session(sessionID)
 	if err != nil {
 		return runtime.ExecResult{}, err
 	}
 	start := time.Now()
-	out, err := project.client.Exec(ctx, req.Service, req.Command)
+	var out commandOutput
+	if req.TTY {
+		out, err = project.client.ExecTerminal(ctx, req.Service, req.Command)
+	} else {
+		out, err = project.client.Exec(ctx, req.Service, req.Command)
+	}
 	result := runtime.ExecResult{
 		Stdout:   out.stdout,
 		Stderr:   out.stderr,
@@ -328,6 +340,33 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 		}
 		env[key] = value
 	}
+	// Sync the generated config file so env changes (e.g. LOG_LEVEL=info)
+	// are reflected in the file mounted into the container. The service
+	// reads this file at startup, so a stale config file would mask the fix.
+	if err := writeServiceConfig(project.client.ProjectDir, project.spec); err != nil {
+		return nil, fmt.Errorf("sync config file: %w", err)
+	}
+	// Files are written to the host filesystem inside the compose project
+	// directory: the config file is mounted into the container, so writing it
+	// here and restarting the service is a real fix - the participant edits
+	// the config file on disk, exactly like on a production host.
+	for patchPath, content := range patch.Files {
+		hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(patchPath))
+		if err := a.writeConfigFile(project, patch.Service, hostPath, content); err != nil {
+			return nil, fmt.Errorf("write %s into %s: %w", patchPath, patch.Service, err)
+		}
+	}
+	// If the patch carries a new image tag (e.g. after rebuilding the
+	// participant's workspace), update the service image in the live spec
+	// so the recreated container uses the fixed code.
+	if patch.Image != "" {
+		for i := range project.spec.Services {
+			if project.spec.Services[i].Name == patch.Service {
+				project.spec.Services[i].Image = patch.Image
+				break
+			}
+		}
+	}
 	// The compose file is rewritten before the service is recreated: compose
 	// builds the new container from the file on disk, so writing it afterwards
 	// would recreate the service with the old configuration and the fix would
@@ -356,8 +395,8 @@ func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.Env
 
 // resolveVerifiedPorts resolves ports and confirms each endpoint answers. A
 // recreate has a window in which `compose port` still reports the port of the
-// container being replaced, so a mapping is only accepted once a TCP connect
-// to it succeeds.
+// container being replaced, so a mapping is only accepted once the service
+// really answers requests through it.
 func (a *Adapter) resolveVerifiedPorts(ctx context.Context, project *session) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for attempt := 1; ; attempt++ {
@@ -387,15 +426,48 @@ func (a *Adapter) endpointsAnswer(ctx context.Context, project *session) bool {
 			}
 			continue
 		}
-		conn, err := net.DialTimeout("tcp", endpoint, time.Second)
-		if err != nil {
+		if !serviceAnswers(ctx, endpoint, service.Healthcheck) {
 			if debugPorts {
-				log.Printf("compose: endpoint %s of %s does not answer: %v", endpoint, service.Name, err)
+				log.Printf("compose: endpoint %s of %s does not answer", endpoint, service.Name)
 			}
 			return false
 		}
-		conn.Close()
 	}
+	return true
+}
+
+// serviceAnswers reports whether a service really serves requests.
+//
+// A bare TCP dial is not enough and is the reason a verify right after a
+// recreate could fail: Docker's port proxy accepts the connection before the
+// process inside the container listens, so a check that starts measuring
+// immediately sees a connection reset and calls the environment broken. A
+// service that declares a healthcheck is probed over HTTP instead, which is
+// the only proof that it is the service answering and not the proxy.
+//
+// Any HTTP status counts as an answer: a degraded service that says so itself
+// is up, and a verifier must be the one to grade the degradation.
+func serviceAnswers(ctx context.Context, endpoint string, check *runtime.HealthcheckSpec) bool {
+	if check == nil || check.Path == "" {
+		conn, err := net.DialTimeout("tcp", endpoint, time.Second)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}
+	url := fmt.Sprintf("http://%s%s", endpoint, check.Path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	resp.Body.Close()
 	return true
 }
 
@@ -405,8 +477,25 @@ var debugPorts = os.Getenv("INCIDENTSIM_DEBUG_PORTS") != ""
 
 // writeComposeFile renders the live spec of a session to its compose project.
 func (a *Adapter) writeComposeFile(project *session) error {
-	document := Project(projectName(project.id), project.spec)
+	document := Project(project.client.ProjectDir, projectName(project.id), project.spec)
 	return os.WriteFile(filepath.Join(project.client.ProjectDir, composeFile), []byte(document), 0o600)
+}
+
+// writeConfigFile writes content into the config file for a service on the
+// host. The file is mounted into the container, so writing it here and
+// restarting the service is a real fix - the participant edits the config file
+// on disk, exactly like on a production host.
+func (a *Adapter) writeConfigFile(project *session, service, path, content string) error {
+	// The path from the CLI is inside the container (e.g. /etc/app/app.conf).
+	// Map it to the host path in the compose project's config directory.
+	hostPath := filepath.Join(project.client.ProjectDir, "config", filepath.Base(path))
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(hostPath, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *Adapter) session(sessionID string) (*session, error) {

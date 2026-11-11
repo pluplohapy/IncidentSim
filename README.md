@@ -105,20 +105,28 @@ metadata:
   title: "Пул соединений к БД исчерпан"
   level: code                     # config | code | db | composite
 spec:
+  workspace: scenarios/<id>/workspace   # копируется в сессию при start
+  reference: scenarios/<id>/reference   # эталонное решение
   services: [...]                 # образы, env, порты, healthcheck
-  fault:                          # что активирует injector
+  editable: [...]                 # файлы, которые участник может править
+  fault:                          # что активирует injector (опционально для code-level)
     type: sql_config
     target: db
     options: { ... }
   fault_chain: [...]              # только для composite
-  distractors: [...]              # «чинящие» симптом, но не корень
+  distractors: [...]              # «чинящие» симптом, но не корень (каждый указывает fails: <check-id>)
   verify:
     correctness: [...]            # система работает сейчас
     quality: [...]                # решение уместно в проде
+    replay:                       # нагрузка перед проверками
+      profile: workloads/<id>.yaml
+      duration: 75s
+      rps: 20
+      target_service: app         # явная цель replay (опционально)
   root_cause: { ... }
   reference_solution: { ... }
-  replay: { profile: ..., duration: 60s }
   theory: "..."
+  # Вердикты: pass, fail, partial_fix (correctness=pass, quality=fail)
 ```
 
 Задачи в каталоге:
@@ -126,9 +134,11 @@ spec:
 | id | Уровень | Что сломано | Чем ловится маскировка |
 |----|---------|-------------|------------------------|
 | `log-flood-disk` | config | debug-логи без ротации | policy на `LOG_LEVEL=info`: удаление лога проходит correctness и падает на quality |
-| `db-connection-leak` | code | утечка соединений в пуле | policy на флаг утечки + SQL на нераздутый `max_connections` |
+| `db-connection-leak` | code | незакрытая транзакция в пуле: соединения висят в `idle in transaction` | метрика `app_db_pool_in_use` под нагрузкой + SQL на `idle in transaction` |
 | `pg-table-bloat` | db | мёртвые кортежи, autovacuum отключён | SQL: данные на месте и autovacuum включён |
 | `cache-avalanche-retry-storm` | composite | кэш выключен, ретраи без backoff | policy: ретраи **ограничены**, а не выключены |
+
+> Ограничение Firecracker-движка: `apply` с `--file` или сменой образа (code-level задачи) не поддерживается. Firecracker-применение принимает только переменные окружения. Code-level задачи требуют compose-движка, так как фикс пересобирает Docker-образ из рабочей директории участника (`~/.incidentsim/sessions/<id>/workspace/`).
 
 Подробности задачи — [`docs/adding-a-task.md`](docs/adding-a-task.md).
 
@@ -195,9 +205,13 @@ $ make test             # unit-тесты (с -race)
 $ make check            # fmt + vet + test, то же что в CI
 $ bin/incidentsim show  # список задач каталога
 $ bin/incidentsim start db-connection-leak
-$ bin/incidentsim metrics
-$ bin/incidentsim verify
-$ bin/incidentsim postmortem
+$ bin/incidentsim metrics --session <id>
+$ bin/incidentsim apply --session <id> --service app --file app/main.go --content '<код>'
+$ bin/incidentsim apply --session <id> --service app --set POOL_MAX=100   # дистрактор: не проходит quality
+$ bin/incidentsim verify --session <id>
+$ bin/incidentsim reset --session <id>
+$ bin/incidentsim postmortem --session <id> --md
+$ bin/incidentsim selfcheck db-connection-leak   # reference: pass, distractors: partial_fix
 $ ./scripts/demo.sh log-flood-disk     # интерактивное демо обеих проверок
 ```
 

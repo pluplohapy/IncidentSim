@@ -72,12 +72,16 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":         task.Metadata.ID,
-		"title":      task.Metadata.Title,
-		"level":      task.Metadata.Level,
-		"symptoms":   task.Spec.Symptoms,
-		"root_cause": task.Spec.RootCause.Summary,
-		"theory":     task.Spec.Theory,
+		"id":          task.Metadata.ID,
+		"title":       task.Metadata.Title,
+		"level":       task.Metadata.Level,
+		"symptoms":    task.Spec.Symptoms,
+		"root_cause":  task.Spec.RootCause.Summary,
+		"theory":      task.Spec.Theory,
+		"editable":    task.Spec.Editable,
+		"workspace":   task.Spec.Workspace,
+		"reference":   task.Spec.Reference,
+		"distractors": task.Spec.Distractors,
 	})
 }
 
@@ -237,6 +241,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 	var body struct {
 		Service string            `json:"service"`
 		Vars    map[string]string `json:"vars"`
+		Files   map[string]string `json:"files"`
 		Restart *bool             `json:"restart"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -247,11 +252,15 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 	if body.Restart != nil {
 		restart = *body.Restart
 	}
-	if len(body.Vars) == 0 {
-		writeError(w, http.StatusBadRequest, "vars are required: a fix must change at least one variable", "")
+	// A restart without variables or files is a legitimate action: it
+	// recreates the service from the declared configuration, which is what a
+	// restart distractor does and what a participant needs after editing a
+	// mounted file. Only a patch that changes nothing at all is refused.
+	if len(body.Vars) == 0 && len(body.Files) == 0 && !restart {
+		writeError(w, http.StatusBadRequest, "vars, files or a restart are required: a fix must change at least something", "")
 		return
 	}
-	patch := runtime.EnvPatch{Service: body.Service, Vars: body.Vars, Restart: restart}
+	patch := runtime.EnvPatch{Service: body.Service, Vars: body.Vars, Restart: restart, Files: body.Files}
 	if err := s.Orchestrator.Apply(r.Context(), session.ID, patch); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "")
 		return
@@ -259,29 +268,46 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, session *Se
 	writeJSON(w, http.StatusOK, map[string]any{"applied": patch})
 }
 
-// handleExec runs a statement on a database service. It is the participant's
-// write path for db-level tasks, where the fix is a statement rather than an
-// environment variable.
+// handleExec runs a command inside a service of a session.
+//
+// The command is the primitive: a participant debugging an incident needs a
+// shell (cat, ps, ss, tcpdump, a manual psql session), not a fixed set of
+// verbs. The statement form stays as sugar, because the client binary and the
+// task database of a statement are manifest data the server owns.
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request, session *Session) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
 		return
 	}
 	var body struct {
-		Service   string `json:"service"`
-		Statement string `json:"statement"`
+		Service   string   `json:"service"`
+		Command   []string `json:"command"`
+		Statement string   `json:"statement"`
+		TimeoutMS int      `json:"timeout_ms"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
 		return
 	}
-	if body.Statement == "" {
-		writeError(w, http.StatusBadRequest, "statement is required", "")
+	command := body.Command
+	if len(command) == 0 {
+		// Sugar: a bare statement is run with the database client of the
+		// task, so `--sql` does not have to duplicate manifest knowledge in
+		// the CLI.
+		if strings.TrimSpace(body.Statement) == "" {
+			writeError(w, http.StatusBadRequest, "command is required: a list of the program and its arguments", "")
+			return
+		}
+		command = sqlCommand(session.manifest, body.Service, body.Statement)
+	}
+	if len(command) == 0 {
+		writeError(w, http.StatusBadRequest, "command is required: a list of the program and its arguments", "")
 		return
 	}
-	result, err := s.Orchestrator.ExecSQL(r.Context(), session.ID, body.Service, body.Statement)
+	timeout := time.Duration(body.TimeoutMS) * time.Millisecond
+	result, err := s.Orchestrator.Exec(r.Context(), session.ID, body.Service, command, timeout)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), result.Stderr)
+		writeError(w, http.StatusBadGateway, err.Error(), strings.TrimSpace(result.Stderr))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

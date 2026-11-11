@@ -87,6 +87,9 @@ type Spec struct {
 	Replay            *ReplaySpec       `yaml:"replay,omitempty" json:"replay,omitempty"`
 	Distractors       []Distractor      `yaml:"distractors,omitempty" json:"distractors,omitempty"`
 	Theory            string            `yaml:"theory,omitempty" json:"theory,omitempty"`
+	Editable          []string          `yaml:"editable,omitempty" json:"editable,omitempty"`
+	Workspace         string            `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	Reference         string            `yaml:"reference,omitempty" json:"reference,omitempty"`
 }
 
 // RuntimeSpec selects the isolation engine and the baseline artefact.
@@ -139,8 +142,9 @@ type FaultSpec struct {
 // VerifySpec groups checks by gate. A run passes only when every correctness
 // check passes and every quality check passes.
 type VerifySpec struct {
-	Correctness []Check `yaml:"correctness" json:"correctness"`
-	Quality     []Check `yaml:"quality" json:"quality"`
+	Correctness []Check     `yaml:"correctness" json:"correctness"`
+	Quality     []Check     `yaml:"quality" json:"quality"`
+	Replay      *ReplaySpec `yaml:"replay,omitempty" json:"replay,omitempty"`
 }
 
 // Check is one verification step. Fields are explicit on purpose: the verifier
@@ -161,6 +165,12 @@ type Check struct {
 	Duration string       `yaml:"duration,omitempty" json:"duration,omitempty"`
 	Expect   *Expectation `yaml:"expect,omitempty" json:"expect,omitempty"`
 	Reason   string       `yaml:"reason,omitempty" json:"reason,omitempty"`
+	// File is the configuration file inside the container a policy check
+	// reads (e.g. /etc/app/app.conf). Declaring it makes the check read the
+	// file the service actually loads at startup instead of the process
+	// environment, which is what keeps the "fix is visible to the check"
+	// invariant honest when the fix is a config edit.
+	File string `yaml:"file,omitempty" json:"file,omitempty"`
 }
 
 // Expectation is the pass condition of a check.
@@ -190,10 +200,11 @@ type ReferenceSolution struct {
 
 // ReplaySpec configures the load replayed during verification.
 type ReplaySpec struct {
-	Profile     string `yaml:"profile" json:"profile"`
-	Duration    string `yaml:"duration" json:"duration"`
-	RPS         int    `yaml:"rps,omitempty" json:"rps,omitempty"`
-	Concurrency int    `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	Profile       string `yaml:"profile" json:"profile"`
+	Duration      string `yaml:"duration" json:"duration"`
+	RPS           int    `yaml:"rps,omitempty" json:"rps,omitempty"`
+	Concurrency   int    `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	TargetService string `yaml:"target_service,omitempty" json:"target_service,omitempty"`
 }
 
 // Distractor describes an action that hides the symptom without removing the

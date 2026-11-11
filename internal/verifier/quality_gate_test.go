@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -65,8 +66,8 @@ func TestDistractorPassesCorrectnessButFailsQuality(t *testing.T) {
 	if report.Quality.Verdict != VerdictFail {
 		t.Fatalf("quality = %s, want fail: the root cause is still there", report.Quality.Verdict)
 	}
-	if report.Verdict != VerdictFail {
-		t.Fatalf("verdict = %s, want fail", report.Verdict)
+	if report.Verdict != VerdictPartial {
+		t.Fatalf("verdict = %s, want partial_fix", report.Verdict)
 	}
 	failed := report.Quality.FailedResults()
 	if len(failed) != 1 || failed[0].Check.ID != "log-level-info" {
@@ -147,21 +148,48 @@ func TestPolicyRuleEnvFlagOff(t *testing.T) {
 func TestPolicyRuleLogOutputPreserved(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
-	if err := os.WriteFile(path, []byte("line\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("line\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), nil, Check{Query: "LOG_FILE"}, map[string]string{"LOG_FILE": path}); err != nil {
+	empty := filepath.Join(dir, "empty.log")
+	os.WriteFile(empty, nil, 0o644)
+	gone := filepath.Join(dir, "gone.log")
+
+	env := FakeEnvironment{
+		ExecFunc: func(req runtime.ExecRequest) (runtime.ExecResult, error) {
+			if req.Command[0] == "sh" && req.Command[1] == "-c" {
+				testCmd := req.Command[2]
+				if testCmd == fmt.Sprintf("test -s %q", path) {
+					return runtime.ExecResult{ExitCode: 0}, nil
+				}
+				if testCmd == fmt.Sprintf("test -s %q", empty) || testCmd == fmt.Sprintf("test -s %q", gone) {
+					return runtime.ExecResult{ExitCode: 1}, nil
+				}
+			}
+			return runtime.ExecResult{ExitCode: 1}, fmt.Errorf("unexpected command")
+		},
+	}
+
+	check := Check{
+		ID:      "log-output-preserved",
+		Kind:    CheckPolicy,
+		Service: "app",
+		Rule:    RuleLogOutputPreserved,
+		Query:   "LOG_FILE",
+		Reason:  "log output must be preserved",
+	}
+
+	// Existing non-empty file passes
+	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), env, check, map[string]string{"LOG_FILE": path}); err != nil {
 		t.Fatalf("a present log was rejected: %v", err)
 	}
 
-	// A deleted or emptied log is the classic distractor: it hides the
-	// symptom and destroys the evidence.
-	empty := filepath.Join(dir, "empty.log")
-	os.WriteFile(empty, nil, 0o600)
-	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), nil, Check{Query: "LOG_FILE"}, map[string]string{"LOG_FILE": empty}); err == nil {
+	// Empty file fails
+	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), env, check, map[string]string{"LOG_FILE": empty}); err == nil {
 		t.Error("an empty log file passed the preserved-output rule")
 	}
-	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), nil, Check{Query: "LOG_FILE"}, map[string]string{"LOG_FILE": filepath.Join(dir, "gone.log")}); err == nil {
+	// Deleted file fails
+	if err := PolicyRules[RuleLogOutputPreserved](context.Background(), env, check, map[string]string{"LOG_FILE": gone}); err == nil {
 		t.Error("a deleted log file passed the preserved-output rule")
 	}
 }

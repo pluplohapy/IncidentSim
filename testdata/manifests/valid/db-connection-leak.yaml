@@ -31,18 +31,13 @@ spec:
         port: 8080
         interval_seconds: 5
         timeout_seconds: 2
+  editable: [app/main.go, go.mod, go.sum]
   symptoms:
     - id: errors-5xx
       observation: "GET /api/orders отвечает 503, в логах app видны connection pool exhausted"
   hints:
     - level: 1
       text: "Сравните метрики app_db_pool_in_use и app_db_pool_max"
-  fault:
-    type: feature_flag
-    target: app
-    options:
-      env:
-        POOL_LEAK: "true"
   verify:
     correctness:
       - id: healthz-200
@@ -59,12 +54,14 @@ spec:
         expect:
           max: 5
     quality:
-      - id: leak-flag-off
-        type: policy
+      - id: pool-in-use-not-maxed
+        type: metric
         service: app
-        rule: env_flag_off
-        query: POOL_LEAK
-        reason: "Утечка — дефект кода, флаг должен быть выключен, а не спрятан ростом лимита"
+        query: app_db_pool_in_use
+        duration: 30s
+        expect:
+          max: 15
+        reason: "Утечка соединений должна быть исправлена в коде, а не скрыта ростом лимита пула"
       - id: max-connections-not-inflated
         type: sql
         service: db
@@ -73,21 +70,27 @@ spec:
           max: 200
         reason: "Раздувание лимита соединений БД убирает симптом, оставляя утечку"
   root_cause:
-    summary: "Приложение не возвращает соединения в пул: флаг POOL_LEAK=true включает утечку в коде."
+    summary: "Приложение не возвращает соединения в пул: в обработчике заказов отсутствует defer rows.Close(), соединения остаются открытыми."
     layer: code
     signals:
-      - "app_db_pool_in_race == app_db_pool_max"
+      - "app_db_pool_in_use == app_db_pool_max"
       - "pg_stat_activity: много idle in transaction"
     masked_by: [raise-max-connections]
+  theory: |
+    Утечка соединений — типовой дефект уровня кода: пул берёт соединение и не
+    возвращает его в общем случае ошибки. Первое, что видит участник, —
+    исчерпание пула и 503 на запросах. Диагностика идёт по метрикам
+    app_db_pool_in_use относительно app_db_pool_max и по pg_stat_activity.
+    "Раздуть max_connections" убирает симптом и оставляет утечку: через
+    несколько часов она съест и новый лимит.
   reference_solution:
-    summary: "Выключить POOL_LEAK и перезапустить app, затем убедиться что in_use упал."
+    summary: "Добавить defer rows.Close() в обработчик заказов"
     steps:
-      - "Найти флаг в env сервиса app"
-      - "Выставить POOL_LEAK=false и перезапустить"
+      - "Открыть ~/.incidentsim/sessions/<id>/workspace/app/main.go"
+      - "Добавить defer rows.Close() сразу после получения rows в обработчике заказов"
+      - "incidentsim apply <session> --service app --file app/main.go --content <новое содержимое>"
       - "Повторить verify"
-    commands:
-      - "incidentsim apply --service app --set POOL_LEAK=false"
-    rollback: "Вернуть POOL_LEAK=true, если нагрузка упадёт ещё сильнее"
+    rollback: "incidentsim reset <session>"
   distractors:
     - id: raise-max-connections
       title: "Раздуть max_connections в БД, чтобы ошибки исчезли"

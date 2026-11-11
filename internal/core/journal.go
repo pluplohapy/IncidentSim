@@ -29,6 +29,17 @@ const (
 	EventReset           = "environment.reset"
 	EventTeardown        = "environment.down"
 	EventSessionFinished = "session.finished"
+
+	// Code-level lifecycle events.
+	EventApplyStarted     = "apply.started"
+	EventBuildOK          = "build.ok"
+	EventBuildFailed      = "build.failed"
+	EventServiceRecreated = "service.recreated"
+
+	// Shell-exec events: a participant debugging a session runs commands
+	// inside the environment, and the journal is the audit trail of that.
+	EventExecRun    = "exec.run"
+	EventExecFailed = "exec.failed"
 )
 
 // Event is one line of a session journal.

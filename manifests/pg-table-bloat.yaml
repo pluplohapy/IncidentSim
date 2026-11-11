@@ -32,6 +32,7 @@ spec:
         port: 8080
         interval_seconds: 5
         timeout_seconds: 3
+  editable: []
   symptoms:
     - id: slow-orders
       observation: "метрика app_db_dead_tuples показывает 100000 мёртвых кортежей в orders"
@@ -88,6 +89,10 @@ spec:
         expect:
           min: 1
         reason: "Отключённый autovacuum — корень: без него bloat вернётся сам"
+    replay:
+      profile: workloads/pg-table-bloat.yaml
+      duration: 20s
+      rps: 5
   root_cause:
     summary: "Массовый UPDATE создал десятки тысяч мёртвых кортежей, а autovacuum для orders был отключён, поэтому dead tuples не убирались и чтение деградировало."
     layer: db
@@ -111,10 +116,6 @@ spec:
       symptom: slow-orders
       masked_artifact: "все заказы клиентов"
       fails: data-preserved
-  replay:
-    profile: workloads/pg-table-bloat.yaml
-    duration: 20s
-    rps: 5
   theory: |
     Bloat — это мёртвые кортежи, которые занимают место и замедляют seq scan.
     Автовакуум обычно убирает их сам, поэтому «выключить autovacuum, чтобы

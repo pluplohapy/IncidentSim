@@ -1,0 +1,54 @@
+name: selfcheck
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build workload image
+        run: docker build -t incidentsim/workload:dev -f build/workload.Dockerfile .
+
+      - name: Build incidentsim
+        run: mkdir -p bin && go build -o bin/incidentsim ./cmd/incidentsim
+
+      - name: Start incidentsim core
+        env:
+          INCIDENTSIM_ADDR: http://127.0.0.1:8747
+        run: |
+          ./bin/incidentsim serve > /tmp/serve.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8747/healthz && break
+            sleep 0.2
+          done
+          curl -fsS http://127.0.0.1:8747/healthz || { cat /tmp/serve.log; exit 1; }
+
+      - name: Run selfcheck for every task
+        env:
+          INCIDENTSIM_ADDR: http://127.0.0.1:8747
+        run: |
+          tasks=$(./bin/incidentsim show | tail -n +2 | awk '{print $1}')
+          count=$(printf '%s\n' "$tasks" | wc -l)
+          [ "$count" -ge 4 ] || { echo "expected at least 4 tasks, got $count"; exit 1; }
+          for task in $tasks; do
+            echo "=== selfcheck $task ==="
+            ./bin/incidentsim selfcheck "$task" || exit 1
+          done
+
+      - name: Validate manifests
+        env:
+          INCIDENTSIM_ADDR: http://127.0.0.1:8747
+        run: ./bin/incidentsim validate manifests

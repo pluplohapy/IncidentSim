@@ -7,6 +7,8 @@ metadata:
   tags: [composite, cache, retry, postgres]
   estimated_minutes: 45
 spec:
+  workspace: scenarios/cache-avalanche-retry-storm/workspace
+  reference: scenarios/cache-avalanche-retry-storm/reference
   runtime:
     engine: compose
     memory_mib: 2048
@@ -35,6 +37,7 @@ spec:
         port: 8080
         interval_seconds: 5
         timeout_seconds: 3
+  editable: [config/app.conf]
   symptoms:
     - id: errors-5xx
       observation: "GET /api/orders отвечает 503, метрика app_errors_total растёт"
@@ -93,7 +96,8 @@ spec:
       - id: cache-back-on
         type: policy
         service: app
-        rule: env_flag_equals
+        rule: config_flag_equals
+        file: /etc/app/app.conf
         query: CACHE_ENABLED
         expect:
           equals: "true"
@@ -102,9 +106,11 @@ spec:
         type: policy
         service: app
         rule: retry_loop_bounded
+        file: /etc/app/app.conf
         query: RETRY_BACKOFF_MS
         expect:
           min: 20
+          max: 5
         reason: "Петля усиливается ретраями без backoff: именно этот линк chain должен быть ограничен, иначе storm вернётся"
       - id: connection-limit-restored
         type: sql
@@ -113,6 +119,10 @@ spec:
         expect:
           min: 1
         reason: "Урезанный лимит соединений прячет нагрузку под повышенными ошибками, оставляя причину"
+    replay:
+      profile: workloads/cache-avalanche-retry-storm.yaml
+      duration: 20s
+      rps: 10
   root_cause:
     summary: "Отключённый кэш увеличил долю запросов к БД, а ретраи без backoff и с 20 попытками размножили каждый запрос: нагрузка на БД выросла на порядок, пул соединений и БД не выдержали."
     layer: composite
@@ -124,12 +134,12 @@ spec:
   reference_solution:
     summary: "Вернуть кэш и ограничить ретраи backoff'ом, не отключая их."
     steps:
-      - "Включить CACHE_ENABLED=true"
+      - "Включить CACHE_ENABLED=true в config/app.conf"
       - "Вернуть RETRY_BACKOFF_MS >= 20 и RETRY_ATTEMPTS <= 5"
-      - "Вернуть лимит соединений роли (ALTER ROLE postgres CONNECTION LIMIT 100)"
+      - "Вернуть лимит соединений роли (ALTER ROLE postgres CONNECTION LIMIT -1)"
     commands:
-      - "incidentsim apply --service app --set CACHE_ENABLED=true"
-      - "incidentsim apply --service app --set RETRY_BACKOFF_MS=50 --set RETRY_ATTEMPTS=5"
+      - "incidentsim apply --service app --file config/app.conf --content <новое содержимое>"
+      - "incidentsim apply --service app --set CACHE_ENABLED=true --set RETRY_BACKOFF_MS=50 --set RETRY_ATTEMPTS=5"
       - "incidentsim apply --service db --sql \"ALTER ROLE postgres CONNECTION LIMIT -1\""
     rollback: "Если нагрузка упадёт ещё сильнее, проверьте, что кэш прогрет: холодный старт даёт тот же эффект"
   distractors:
@@ -143,10 +153,6 @@ spec:
       symptom: errors-5xx
       masked_artifact: "причина: env восстанавливается из рестарта"
       fails: cache-back-on
-  replay:
-    profile: workloads/cache-avalanche-retry-storm.yaml
-    duration: 20s
-    rps: 10
   theory: |
     Avalanche: кэш отключён, и каждый запрос пошёл в БД. Ретраи без backoff
     превращают замедление в лавину: один упавший запрос порождает 20 попыток,

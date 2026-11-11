@@ -19,14 +19,14 @@ const composeFile = "compose.yaml"
 // and a restarted session does not inherit a stale binding. The adapter then
 // asks `compose port` for the real mapping, which is what makes the endpoints
 // it reports honest.
-func Project(name string, spec runtime.Spec) string {
+func Project(projectDir, name string, spec runtime.Spec) string {
 	var b strings.Builder
 	b.WriteString("name: ")
 	b.WriteString(name)
 	b.WriteString("\nservices:\n")
 
 	for _, service := range spec.Services {
-		writeService(&b, service, spec.FaultEnv)
+		writeService(&b, projectDir, service, spec.FaultEnv, spec.CPUCount, spec.MemoryMiB)
 	}
 
 	b.WriteString("networks:\n  default:\n    name: ")
@@ -35,7 +35,7 @@ func Project(name string, spec runtime.Spec) string {
 	return b.String()
 }
 
-func writeService(b *strings.Builder, service runtime.ServiceSpec, faultEnv map[string]string) {
+func writeService(b *strings.Builder, projectDir string, service runtime.ServiceSpec, faultEnv map[string]string, cpuCount, memoryMiB int) {
 	b.WriteString("  ")
 	b.WriteString(service.Name)
 	b.WriteString(":\n")
@@ -69,6 +69,18 @@ func writeService(b *strings.Builder, service runtime.ServiceSpec, faultEnv map[
 		}
 	}
 
+	// The generated configuration file is mounted into the container. It is
+	// read-only on purpose: the file the service loads is the host's file, so
+	// a write inside the container would change what a verification grades
+	// without going through Apply (which records it, validates it against
+	// spec.editable and re-creates the service). A shell inside the container
+	// can read it, which is what debugging needs, and cannot silently rewrite
+	// the artefact it is graded on.
+	b.WriteString("    volumes:\n")
+	b.WriteString(fmt.Sprintf("      - %q\n",
+		fmt.Sprintf("%s:%s/%s:ro",
+			configPath(projectDir, service.Name), configMountDir, service.Name+".conf")))
+
 	if service.Healthcheck != nil {
 		interval := service.Healthcheck.IntervalSeconds
 		if interval <= 0 {
@@ -80,6 +92,21 @@ func writeService(b *strings.Builder, service runtime.ServiceSpec, faultEnv map[
 		}
 		b.WriteString(fmt.Sprintf("    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -fsS http://127.0.0.1:%d%s || exit 1\"]\n      interval: %ds\n      timeout: %ds\n      retries: 10\n",
 			service.Healthcheck.Port, service.Healthcheck.Path, interval, timeout))
+	}
+
+	// Resource limits isolate the task environment from the host and from
+	// other sessions. CPU is expressed as a fraction of a core (0.25 = one
+	// quarter), memory as bytes.
+	if cpuCount > 0 || memoryMiB > 0 {
+		b.WriteString("    deploy:\n")
+		b.WriteString("      resources:\n")
+		b.WriteString("        limits:\n")
+		if cpuCount > 0 {
+			b.WriteString(fmt.Sprintf("          cpus: '%.2f'\n", float64(cpuCount)))
+		}
+		if memoryMiB > 0 {
+			b.WriteString(fmt.Sprintf("          memory: %dM\n", memoryMiB))
+		}
 	}
 }
 

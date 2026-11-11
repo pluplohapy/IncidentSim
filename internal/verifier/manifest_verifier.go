@@ -39,19 +39,78 @@ func NewManifestVerifier() *ManifestVerifier {
 }
 
 // Verify implements Verifier.
+//
+// The order is the whole point of the method:
+//
+//   - the baseline counters of earlier runs are cleared first, so no
+//     measurement of this run is polluted by a previous one;
+//   - correctness runs before the load: it answers "does the system
+//     answer at all", which is a property of the current state and not of
+//     the replay;
+//   - the replay starts before the quality gate and runs for as long as
+//     the quality checks measure, because a quality check that grades an
+//     idle system would let a task be "fixed" by stopping the service.
 func (v *ManifestVerifier) Verify(ctx context.Context, env Environment, sessionID, taskID string, checks CheckSet) (Report, error) {
 	report := NewReport(sessionID, taskID)
 	if env == nil {
 		return report, fmt.Errorf("%w: no environment given", ErrProbeFailed)
 	}
 
-	// The observation window runs first: a gate that measures an idle system
-	// would let a task be "fixed" by stopping the service.
-	report.Replay = v.runReplay(ctx, env, checks)
+	// Counters of a previous verification must not land inside the window
+	// this one measures.
+	v.resetBaseline(ctx, env)
+
+	// Correctness first: a point check of the current state.
 	report.Correctness.Results = v.runGate(ctx, env, checks.Correctness)
+
+	// The observation window starts now and the quality gate measures
+	// inside it. A gate that measures an idle system would let a task be
+	// "fixed" by stopping the service.
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	replayDone := make(chan string, 1)
+	go func() {
+		replayDone <- v.runReplay(replayCtx, env, checks)
+	}()
+	select {
+	case <-ctx.Done():
+		cancelReplay()
+		<-replayDone
+		return report, ctx.Err()
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	report.Quality.Results = v.runGate(ctx, env, checks.Quality)
+	cancelReplay()
+	report.Replay = <-replayDone
 	report.Finalise()
 	return report, nil
+}
+
+// resetBaseline clears the counters a service keeps across verifications.
+//
+// A metric like app_errors_total is a counter, so a window that measures it
+// without a reset would grade the traffic of the previous run as well. The
+// debug endpoint is a capability of the task service: a service that does
+// not expose it simply keeps its counters, and a missing endpoint is not a
+// failed run.
+func (v *ManifestVerifier) resetBaseline(ctx context.Context, env Environment) {
+	instance := env.Instance()
+	if instance == nil {
+		return
+	}
+	for _, svc := range instance.Services {
+		if svc.Endpoint == "" || strings.HasPrefix(svc.Endpoint, "vsock://") {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+svc.Endpoint+"/debug/reset", nil)
+		if err != nil {
+			continue
+		}
+		client := &http.Client{Timeout: 2 * time.Second}
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
 }
 
 // runReplay replays the declared load and returns a summary for the report.
@@ -87,6 +146,12 @@ func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, check
 
 // replayTarget resolves the endpoint the replay should load.
 func replayTarget(instance *runtime.Instance, checks CheckSet) string {
+	// An explicit replay.target_service from the manifest takes precedence.
+	if checks.Replay != nil && checks.Replay.TargetService != "" {
+		if endpoint := endpointFor(instance, checks.Replay.TargetService); endpoint != "" {
+			return endpoint
+		}
+	}
 	// A correctness check names the service that carries the incident, so it is
 	// the most honest source of the target.
 	for _, check := range checks.Correctness {
@@ -116,6 +181,9 @@ func (v *ManifestVerifier) profileRequests(config *ReplayConfig) ([]Request, err
 	profile, err := LoadReplayProfile(v.ProjectDir, config.Profile)
 	if err != nil {
 		return nil, err
+	}
+	if config.Concurrency == 0 {
+		config.Concurrency = profile.Concurrency
 	}
 	return profile.Requests, nil
 }
@@ -214,6 +282,11 @@ func (v *ManifestVerifier) checkHTTP(ctx context.Context, env Environment, check
 
 func (v *ManifestVerifier) checkMetric(ctx context.Context, env Environment, check Check) Result {
 	result := Result{Check: check}
+
+	if check.Duration != "" {
+		return v.checkMetricWindow(ctx, env, check)
+	}
+
 	samples, err := env.Runtime().Metrics(ctx, env.InstanceID(), check.Service)
 	if err != nil {
 		return fail(result, fmt.Sprintf("read metrics: %v", err))
@@ -243,6 +316,64 @@ func (v *ManifestVerifier) checkMetric(ctx context.Context, env Environment, che
 	}
 	result.Passed = true
 	result.Detail = fmt.Sprintf("%s = %v within bounds", latest.Name, latest.Value)
+	return result
+}
+
+func (v *ManifestVerifier) checkMetricWindow(ctx context.Context, env Environment, check Check) Result {
+	result := Result{Check: check}
+
+	duration, err := time.ParseDuration(check.Duration)
+	if err != nil {
+		return fail(result, fmt.Sprintf("invalid duration %q: %v", check.Duration, err))
+	}
+	if duration <= 0 {
+		return fail(result, fmt.Sprintf("duration must be positive, got %q", check.Duration))
+	}
+
+	interval := 2 * time.Second
+	deadline := time.Now().Add(duration)
+	var best *runtime.MetricSample
+
+	for {
+		samples, err := env.Runtime().Metrics(ctx, env.InstanceID(), check.Service)
+		if err != nil {
+			return fail(result, fmt.Sprintf("read metrics: %v", err))
+		}
+		for i := range samples {
+			if samples[i].Name != check.Query {
+				continue
+			}
+			if best == nil || samples[i].Value > best.Value {
+				best = &samples[i]
+			}
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fail(result, "context cancelled")
+		case <-time.After(interval):
+		}
+	}
+
+	if best == nil {
+		return fail(result, fmt.Sprintf("metric %q not found on service %q", check.Query, check.Service))
+	}
+	result.Evidence = fmt.Sprintf("%s max = %v over %s", best.Name, best.Value, duration)
+
+	if check.Expect == nil {
+		return fail(result, "metric check requires expect.min or expect.max")
+	}
+	if check.Expect.Min != nil && best.Value < *check.Expect.Min {
+		return fail(result, fmt.Sprintf("%s max = %v, want >= %v", best.Name, best.Value, *check.Expect.Min))
+	}
+	if check.Expect.Max != nil && best.Value > *check.Expect.Max {
+		return fail(result, fmt.Sprintf("%s max = %v, want <= %v", best.Name, best.Value, *check.Expect.Max))
+	}
+	result.Passed = true
+	result.Detail = fmt.Sprintf("%s max = %v within bounds", best.Name, best.Value)
 	return result
 }
 
@@ -311,7 +442,7 @@ func (v *ManifestVerifier) checkSQL(ctx context.Context, env Environment, check 
 	result := Result{Check: check}
 	rows, err := env.SQL(ctx, check.Service, check.SQL)
 	if err != nil {
-		return fail(result, fmt.Sprintf("sql failed: %v", err))
+		return fail(result, classifySQLError(err))
 	}
 	if len(rows) == 0 {
 		return fail(result, "statement returned no rows")
@@ -335,6 +466,30 @@ func (v *ManifestVerifier) checkSQL(ctx context.Context, env Environment, check 
 	result.Passed = true
 	result.Detail = fmt.Sprintf("sql value %v within bounds", value)
 	return result
+}
+
+// classifySQLError distinguishes a database connection problem from an
+// invalid query, so the report tells the participant whether the database
+// is unreachable or the statement is wrong.
+func classifySQLError(err error) string {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "connection refused"),
+		strings.Contains(lower, "connect: "),
+		strings.Contains(lower, "no such host"):
+		return "sql failed: database unreachable (connection refused)"
+	case strings.Contains(lower, "deadline"),
+		strings.Contains(lower, "timeout"),
+		strings.Contains(lower, "i/o timeout"):
+		return "sql failed: database unreachable (connection timeout)"
+	case strings.Contains(lower, "syntax error"),
+		strings.Contains(lower, "relation does not exist"),
+		strings.Contains(lower, "column does not exist"):
+		return fmt.Sprintf("sql failed: invalid query — %s", msg)
+	default:
+		return fmt.Sprintf("sql failed: %v", err)
+	}
 }
 
 // endpointFor finds the reachable endpoint of a service on an instance.

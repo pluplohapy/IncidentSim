@@ -30,7 +30,7 @@ func TestReportFinalisePassesOnlyWhenBothGatesPass(t *testing.T) {
 			name:        "symptom masked",
 			correctness: gateWith(VerdictPass, true, true),
 			quality:     gateWith(VerdictFail, true, false),
-			wantCorrect: VerdictPass, wantQuality: VerdictFail, wantVerdict: VerdictFail,
+			wantCorrect: VerdictPass, wantQuality: VerdictFail, wantVerdict: VerdictPartial,
 		},
 		{
 			name:        "no checks at all",

@@ -7,6 +7,8 @@ metadata:
   tags: [postgres, go, connection-pool]
   estimated_minutes: 30
 spec:
+  workspace: scenarios/db-connection-leak/workspace
+  reference: scenarios/db-connection-leak/reference
   runtime:
     engine: compose
     memory_mib: 1024
@@ -25,24 +27,33 @@ spec:
         DB_NAME: orders
         DB_USER: postgres
         DB_PASSWORD: incidentsim
+        POOL_MAX: "10"
+        DB_APP_NAME: "app"
       ports: [8080]
       healthcheck:
         path: /healthz
         port: 8080
         interval_seconds: 5
         timeout_seconds: 2
+  editable: [app/main.go]
   symptoms:
     - id: errors-5xx
-      observation: "GET /api/orders отвечает 503, в логах app видны connection pool exhausted"
+      observation: "GET /api/orders зависает на 2 с и возвращает 500; app_db_pool_in_use упирается в app_db_pool_max"
   hints:
     - level: 1
       text: "Сравните метрики app_db_pool_in_use и app_db_pool_max"
+    - level: 2
+      text: "Посмотрите pg_stat_activity: соединения app висят в состоянии idle in transaction и не возвращаются в пул"
+    - level: 3
+      text: "В обработчике заказов транзакция не закрывается (db.Begin без Rollback) и rows не закрываются — соединение не возвращается в пул"
   fault:
-    type: feature_flag
-    target: app
+    type: sql_config
+    target: db
+    trigger: on_start
     options:
-      env:
-        POOL_LEAK: "true"
+      statements:
+        - "CREATE TABLE IF NOT EXISTS orders (id serial primary key, customer text, total numeric, created_at timestamptz default now())"
+        - "INSERT INTO orders (customer, total) SELECT 'customer-' || g, g * 10 FROM generate_series(1, 1000) g"
   verify:
     correctness:
       - id: healthz-200
@@ -51,57 +62,73 @@ spec:
         path: /healthz
         expect:
           status: 200
-      - id: errors-bounded
+      - id: orders-200
+        type: http
+        service: app
+        path: /api/orders
+        expect:
+          status: 200
+    quality:
+      - id: pool-in-use-not-maxed
+        type: metric
+        service: app
+        query: app_db_pool_in_use
+        duration: 75s
+        expect:
+          max: 5
+        reason: "Утечка соединений должна быть исправлена в коде, а не скрыта ростом лимита пула"
+      - id: errors-zero
         type: metric
         service: app
         query: app_errors_total
-        duration: 30s
+        duration: 75s
         expect:
-          max: 5
-    quality:
-      - id: leak-flag-off
-        type: policy
-        service: app
-        rule: env_flag_off
-        query: POOL_LEAK
-        reason: "Утечка — дефект кода, флаг должен быть выключен, а не спрятан ростом лимита"
-      - id: max-connections-not-inflated
+          max: 0
+        reason: "Под нагрузкой не должно быть ошибок: пул не должен исчерпываться"
+      - id: idle-in-transaction-bounded
         type: sql
         service: db
-        sql: "SHOW max_connections"
+        sql: "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction' AND application_name = 'app'"
         expect:
-          max: 200
-        reason: "Раздувание лимита соединений БД убирает симптом, оставляя утечку"
+          max: 2
+        reason: "Ожидающие в idle in transaction соединения от приложения подтверждают утечку в коде"
   root_cause:
-    summary: "Приложение не возвращает соединения в пул: флаг POOL_LEAK=true включает утечку в коде."
+    summary: "В обработчике заказов открывается транзакция и не закрывается: соединение навсегда остаётся в idle in transaction, пул исчерпывается."
     layer: code
     signals:
-      - "app_db_pool_in_race == app_db_pool_max"
-      - "pg_stat_activity: много idle in transaction"
-    masked_by: [raise-max-connections]
+      - "app_db_pool_in_use == app_db_pool_max"
+      - "pg_stat_activity: соединения app в состоянии idle in transaction"
+    masked_by: [bigger-pool, restart-service]
   theory: |
     Утечка соединений — типовой дефект уровня кода: пул берёт соединение и не
-    возвращает его в общей случае ошибки. Первое, что видит участник, —
+    возвращает его в общем случае ошибки. Первое, что видит участник, —
     исчерпание пула и 503 на запросах. Диагностика идёт по метрикам
     app_db_pool_in_use относительно app_db_pool_max и по pg_stat_activity.
     "Раздуть max_connections" убирает симптом и оставляет утечку: через
     несколько часов она съест и новый лимит.
   reference_solution:
-    summary: "Выключить POOL_LEAK и перезапустить app, затем убедиться что in_use упал."
+    summary: "Добавить defer tx.Rollback() и defer rows.Close() + rows.Err() в обработчик заказов"
     steps:
-      - "Найти флаг в env сервиса app"
-      - "Выставить POOL_LEAK=false и перезапустить"
-      - "Повторить verify"
+      - "Открыть scenarios/db-connection-leak/workspace/app/main.go (или сессионный workspace)"
+      - "Добавить defer rows.Close() сразу после получения rows в обработчике заказов, затем rows.Err() после цикла обхода"
+      - "incidentsim apply <session> --service app --file app/main.go --content <новое содержимо>"
+      - "Повторить incidentsim verify <session>"
+    rollback: "incidentsim reset <session>"
     commands:
-      - "incidentsim apply --service app --set POOL_LEAK=false"
-    rollback: "Вернуть POOL_LEAK=true, если нагрузка упадёт ещё сильнее"
+      - "incidentsim apply <session> --service app --file app/main.go --content '<reference code>'"
+      - "incidentsim verify <session>"
   distractors:
-    - id: raise-max-connections
-      title: "Раздуть max_connections в БД, чтобы ошибки исчезли"
+    - id: bigger-pool
+      title: "Увеличить POOL_MAX в приложении, чтобы соединений хватало"
       symptom: errors-5xx
-      masked_artifact: "потребление соединений на стороне БД"
-      fails: max-connections-not-inflated
+      masked_artifact: "размер пула соединений на стороне приложения"
+      fails: pool-in-use-not-maxed
+    - id: restart-service
+      title: "Перезапустить сервис app, чтобы освободить соединения"
+      symptom: errors-5xx
+      masked_artifact: "состояния пула соединений в памяти приложения"
+      fails: idle-in-transaction-bounded
   replay:
     profile: workloads/db-connection-leak.yaml
-    duration: 30s
+    duration: 75s
     rps: 20

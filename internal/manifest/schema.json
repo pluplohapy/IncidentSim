@@ -54,7 +54,10 @@
         "reference_solution": { "$ref": "#/$defs/referenceSolution" },
         "replay": { "$ref": "#/$defs/replay" },
         "distractors": { "$ref": "#/$defs/distractors" },
-        "theory": { "type": "string" }
+        "theory": { "type": "string" },
+        "editable": { "type": "array", "items": { "type": "string" } },
+        "workspace": { "type": "string" },
+        "reference": { "type": "string" }
       }
     },
 
@@ -150,7 +153,8 @@
       "additionalProperties": false,
       "properties": {
         "correctness": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/check" } },
-        "quality": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/check" } }
+        "quality": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/check" } },
+        "replay": { "$ref": "#/$defs/replay" }
       }
     },
 
@@ -172,7 +176,12 @@
         "command": { "type": "array", "items": { "type": "string" } },
         "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
         "expect": { "$ref": "#/$defs/expectation" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "file": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Configuration file inside the container a policy check reads. Declaring it makes the check read the file the service loads at startup instead of the process environment."
+        }
       },
       "allOf": [
         {
@@ -246,7 +255,8 @@
         "profile": { "type": "string" },
         "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
         "rps": { "type": "integer", "minimum": 1 },
-        "concurrency": { "type": "integer", "minimum": 1 }
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "target_service": { "type": "string" }
       }
     },
 

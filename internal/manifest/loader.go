@@ -193,9 +193,8 @@ func (m *Manifest) validateFaults() []Issue {
 			seen[key] = true
 		}
 	}
-	if m.Spec.Fault == nil && len(m.Spec.FaultChain) == 0 {
-		issues = append(issues, Issue{Field: "spec", Message: "either fault or fault_chain must be set"})
-	}
+	// fault is optional: code-level tasks carry the defect in the scenario
+	// workspace instead of injecting it through a fault.
 	return issues
 }
 
@@ -389,6 +388,15 @@ func (m *Manifest) ValidateWithAssets(projectRoot string) error {
 			issues = append(issues, Issue{
 				Field:   "spec.replay.profile",
 				Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Replay.Profile),
+			})
+		}
+	}
+	if m.Spec.Verify.Replay != nil && m.Spec.Verify.Replay.Profile != "" {
+		profile := filepath.Join(projectRoot, m.Spec.Verify.Replay.Profile)
+		if _, err := os.Stat(profile); err != nil {
+			issues = append(issues, Issue{
+				Field:   "spec.verify.replay.profile",
+				Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Verify.Replay.Profile),
 			})
 		}
 	}

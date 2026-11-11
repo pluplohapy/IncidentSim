@@ -60,6 +60,11 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.call(ctx, http.MethodGet, path, nil, out)
 }
 
+// Post performs a POST against the core API. Exported for use by selfcheck.
+func (c *Client) Post(ctx context.Context, path string, body any, out any) error {
+	return c.post(ctx, path, body, out)
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	return c.call(ctx, http.MethodPost, path, body, out)
 }
@@ -159,10 +164,12 @@ func (c *Client) Show(ctx context.Context, taskID string) error {
 // Start begins a task and returns the new session id.
 func (c *Client) Start(ctx context.Context, taskID string) (string, error) {
 	var session struct {
-		ID       string   `json:"id"`
-		State    string   `json:"state"`
-		Engine   string   `json:"engine"`
-		Services []string `json:"services"`
+		ID           string   `json:"id"`
+		State        string   `json:"state"`
+		Engine       string   `json:"engine"`
+		Services     []string `json:"services"`
+		WorkspaceDir string   `json:"workspace_dir,omitempty"`
+		Editable     []string `json:"editable,omitempty"`
 	}
 	if err := c.post(ctx, "/api/v1/sessions", map[string]string{"task_id": taskID}, &session); err != nil {
 		return "", err
@@ -170,6 +177,12 @@ func (c *Client) Start(ctx context.Context, taskID string) (string, error) {
 	fmt.Fprintf(c.Out, "session %s is %s on engine %s\n", session.ID, session.State, session.Engine)
 	for _, service := range session.Services {
 		fmt.Fprintf(c.Out, "  service %s\n", service)
+	}
+	if session.WorkspaceDir != "" {
+		fmt.Fprintf(c.Out, "Твой код: %s\n", session.WorkspaceDir)
+		if len(session.Editable) > 0 {
+			fmt.Fprintf(c.Out, "Редактируемые файлы: %s\n", strings.Join(session.Editable, ", "))
+		}
 	}
 	fmt.Fprintf(c.Out, "смотрите метрики: incidentsim metrics --session %s\n", session.ID)
 	return session.ID, nil
@@ -253,44 +266,94 @@ func (c *Client) Hint(ctx context.Context, sessionID string, level int) error {
 }
 
 // Apply pushes a fix into the environment.
-func (c *Client) Apply(ctx context.Context, sessionID, service string, vars map[string]string, restart bool) error {
+func (c *Client) Apply(ctx context.Context, sessionID, service string, vars map[string]string, files map[string]string, restart bool) error {
 	var response struct {
 		Applied runtime.EnvPatch `json:"applied"`
 	}
 	body := map[string]any{
 		"service": service,
 		"vars":    vars,
+		"files":   files,
 		"restart": restart,
 	}
 	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/apply", body, &response); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.Out, "applied to %s: %v (restart=%v)\n", service, vars, restart)
+	for path, content := range files {
+		fmt.Fprintf(c.Out, "  wrote %s: %q\n", path, content)
+	}
 	return nil
 }
 
 // ExecSQL runs a statement on a database service. It is how a db-level fix is
 // applied: the change is a statement, not a configuration variable.
+// ExecSQL runs a statement through the core, which knows the database client
+// of the task. It is sugar over Exec: the statement is turned into a command
+// by the server, because the client binary and the task database are manifest
+// data the core owns.
 func (c *Client) ExecSQL(ctx context.Context, sessionID, service, statement string) error {
+	result, err := c.exec(ctx, sessionID, service, nil, statement, 0)
+	if err != nil {
+		return err
+	}
+	return reportExecResult(c, result)
+}
+
+// Exec runs an arbitrary command inside a service of a session and prints its
+// output. It is the participant's shell into the environment: `incidentsim
+// exec --service app -- sh -c 'cat /etc/app/app.conf'` ends up here.
+func (c *Client) Exec(ctx context.Context, sessionID, service string, command []string) error {
+	result, err := c.exec(ctx, sessionID, service, command, "", 0)
+	if err != nil {
+		return err
+	}
+	return reportExecResult(c, result)
+}
+
+// exec posts either a command or a statement and returns the raw outcome, so
+// both callers share one request path.
+func (c *Client) exec(ctx context.Context, sessionID, service string, command []string, statement string, timeoutMS int) (ExecResult, error) {
+	body := map[string]any{"service": service}
+	if len(command) > 0 {
+		body["command"] = command
+	}
+	if statement != "" {
+		body["statement"] = statement
+	}
+	if timeoutMS > 0 {
+		body["timeout_ms"] = timeoutMS
+	}
 	var response struct {
 		ExitCode int    `json:"exit_code"`
 		Stdout   string `json:"stdout"`
 		Stderr   string `json:"stderr"`
 	}
-	body := map[string]any{"service": service, "statement": statement}
 	if err := c.post(ctx, "/api/v1/sessions/"+sessionID+"/exec", body, &response); err != nil {
-		return err
+		return ExecResult{}, err
 	}
-	if response.Stdout != "" {
-		fmt.Fprintln(c.Out, strings.TrimSpace(response.Stdout))
+	return ExecResult{ExitCode: response.ExitCode, Stdout: response.Stdout, Stderr: response.Stderr}, nil
+}
+
+// ExecResult is the raw outcome of a command run inside a session.
+type ExecResult struct {
+	ExitCode int
+	Stdout   string
+	Stderr   string
+}
+
+// reportExecResult prints what the command produced and turns a non-zero exit
+// into an error, so `incidentsim exec` behaves like the command it wraps.
+func reportExecResult(c *Client, result ExecResult) error {
+	if result.Stdout != "" {
+		fmt.Fprintln(c.Out, strings.TrimSpace(result.Stdout))
 	}
-	if response.Stderr != "" {
-		fmt.Fprintln(c.Err, strings.TrimSpace(response.Stderr))
+	if result.Stderr != "" {
+		fmt.Fprintln(c.Err, strings.TrimSpace(result.Stderr))
 	}
-	if response.ExitCode != 0 {
-		return fmt.Errorf("statement exited %d", response.ExitCode)
+	if result.ExitCode != 0 {
+		return fmt.Errorf("command exited %d", result.ExitCode)
 	}
-	fmt.Fprintf(c.Out, "statement applied to %s\n", service)
 	return nil
 }
 

@@ -3,6 +3,7 @@ package compose
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,5 +228,80 @@ func TestScrapeMetricsReadsPrometheusText(t *testing.T) {
 
 	if _, err := scrapeMetrics(ctx, server.URL+"/nope", "app"); err == nil {
 		t.Error("scraping a non-metrics path succeeded")
+	}
+}
+
+// TestServiceAnswersProbesHTTPNotJustTCP is the readiness contract behind a
+// recreate: Docker's port proxy accepts a TCP connection before the process
+// inside the container listens, so a verifier that starts measuring right
+// after Apply used to see connection resets and call the environment broken.
+// A service that declares a healthcheck must answer it over HTTP before the
+// adapter reports the recreate as done.
+func TestServiceAnswersProbesHTTPNotJustTCP(t *testing.T) {
+	ctx := context.Background()
+
+	serving := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer serving.Close()
+	servingHost := strings.TrimPrefix(serving.URL, "http://")
+
+	check := &runtime.HealthcheckSpec{Path: "/healthz", Port: 80}
+	if !serviceAnswers(ctx, servingHost, check) {
+		t.Error("a service that answers its healthcheck was reported as down")
+	}
+
+	// A listening socket that speaks no HTTP is not a ready service: the TCP
+	// fallback must not apply to a service that declares a healthcheck.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if serviceAnswers(ctx, listener.Addr().String(), check) {
+		t.Error("a socket that accepts TCP but speaks no HTTP was reported as ready")
+	}
+
+	// Without a declared healthcheck the TCP dial stays the readiness probe:
+	// a database publishes a port and answers nothing over HTTP.
+	if !serviceAnswers(ctx, listener.Addr().String(), nil) {
+		t.Error("a listening port was reported as down without a healthcheck to probe")
+	}
+}
+
+func TestWriteConfigFileWritesToConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	adapter := New(dir)
+
+	project := &session{
+		id:        "session-1",
+		docker:    "docker",
+		workdir:   filepath.Join(dir, "session-1"),
+		client:    NewClient(dir, "session-1"),
+		spec:      runtime.Spec{},
+		baseline:  runtime.Spec{},
+		hostPorts: map[string]int{},
+	}
+	project.client = project.newClient()
+
+	content := "LOG_LEVEL=info\n"
+	if err := adapter.writeConfigFile(project, "app", "config/app.conf", content); err != nil {
+		t.Fatalf("writeConfigFile: %v", err)
+	}
+
+	// The file must be written as config/app.conf, not config/app.conf.conf
+	expectedPath := filepath.Join(dir, "session-1", "config", "app.conf")
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("expected file %s not written: %v", expectedPath, err)
+	}
+	if string(data) != content {
+		t.Fatalf("file content = %q, want %q", string(data), content)
+	}
+
+	// The doubled-basename path must not exist
+	wrongPath := filepath.Join(dir, "session-1", "config", "app.conf.conf")
+	if _, err := os.Stat(wrongPath); err == nil {
+		t.Fatalf("unexpected file %s exists", wrongPath)
 	}
 }

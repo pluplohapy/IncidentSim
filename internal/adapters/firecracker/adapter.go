@@ -374,6 +374,9 @@ func (a *Adapter) pauseOrKill(ctx context.Context, machine *vm) error {
 // Apply implements runtime.Adapter: a config change is written to the overlay
 // and the guest agent restarts the service with the new environment.
 func (a *Adapter) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) (*runtime.Instance, error) {
+	if len(patch.Files) > 0 || patch.Image != "" {
+		return nil, fmt.Errorf("%w: firecracker engine does not support file or image patches", runtime.ErrUnsupported)
+	}
 	machine, err := a.machine(sessionID)
 	if err != nil {
 		return nil, err

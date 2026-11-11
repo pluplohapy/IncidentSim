@@ -24,3 +24,10 @@ firecracker.log
 
 # Logs
 *.log
+
+# Generated dump of the tree (scripts/collect_code.sh)
+/output.txt
+
+# Built binaries at the repo root
+/incidentsim
+/incidentsim-workload

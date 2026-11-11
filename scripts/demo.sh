@@ -76,9 +76,18 @@ case "$TASK" in
     echo "лог-файл очищен, уровень логирования всё ещё debug"
     ;;
   db-connection-leak)
+    # Дистрактор: раздуть max_connections — симптом уйдёт, утечка останется.
     ./bin/incidentsim apply "$SESSION" --service db --sql "ALTER SYSTEM SET max_connections = 500" >/dev/null
     docker compose --project-name "incidentsim-$SESSION" restart db >/dev/null
     echo "лимит соединений БД раздут, утечка в приложении осталась"
+    say "проверка после дистрактора: утечка не устранена (ожидается FAIL)"
+    ./bin/incidentsim verify "$SESSION" || true
+    
+    # Реальный фикс: чиним код в workspace и пересобираем образ.
+    # Читаем эталон из scenarios/db-connection-leak/reference/app/main.go.
+    INCIDENTSIM_DEMO=1 ./bin/incidentsim apply "$SESSION" --service app --file-from-reference app/main.go >/dev/null
+    echo "в обработчике заказов добавлен defer rows.Close(), образ пересобран"
+    say "проверка после реального фикса: утечка устранена (ожидается PASS)"
     ;;
   pg-table-bloat)
     ./bin/incidentsim apply "$SESSION" --service db --sql "TRUNCATE orders" >/dev/null

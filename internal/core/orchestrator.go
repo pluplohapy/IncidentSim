@@ -1,9 +1,15 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -109,7 +115,36 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 
 	journal.Record(EventSessionStarted, "session started", map[string]any{"task": taskID, "engine": engine})
 
+	// For code-level tasks, copy the broken scenario workspace into
+	// ~/.incidentsim/sessions/<id>/workspace/ so the participant can edit it.
+	if err := o.setupWorkspace(session); err != nil {
+		session.SetState(StateFailed)
+		journal.Record(EventFaultFailed, "workspace setup failed", map[string]any{"error": err.Error()})
+		return session, fmt.Errorf("setup workspace: %w", err)
+	}
+
 	spec := o.runtimeSpec(task)
+	// Only a code-level task ships a buildable workspace: its scenario has a
+	// Dockerfile, and rebuilding the image from the broken code is what makes
+	// the initial state the declared one. A config-, db- or composite-level
+	// task has a workspace of configuration files only — building an image
+	// from it would fail, and none is needed: the adapter writes the config
+	// into the compose project and recreates the service.
+	if session.WorkspaceDir != "" && task.Metadata.Level == manifest.LevelCode {
+		imageTag, err := o.buildWorkspaceImage(ctx, session)
+		if err != nil {
+			session.SetState(StateFailed)
+			journal.Record(EventFaultFailed, "workspace image build failed", map[string]any{"error": err.Error()})
+			return session, fmt.Errorf("build workspace image: %w", err)
+		}
+		for i := range spec.Services {
+			if spec.Services[i].Name == "app" {
+				spec.Services[i].Image = imageTag
+				break
+			}
+		}
+	}
+
 	instance, err := adapter.Up(ctx, sessionID, spec)
 	if err != nil {
 		session.SetState(StateFailed)
@@ -147,9 +182,11 @@ func (o *Orchestrator) runtimeSpec(task *manifest.Manifest) runtime.Spec {
 	}
 	faultEnv := map[string]string{}
 	if task.Spec.Fault != nil {
-		for key, value := range task.Spec.Fault.Options {
-			if text, ok := value.(string); ok && key == "env" {
-				_ = text // env is a nested map, handled by the injectors
+		if envVal, ok := task.Spec.Fault.Options["env"]; ok {
+			if envMap, ok := envVal.(map[string]any); ok {
+				for key, value := range envMap {
+					faultEnv[key] = fmt.Sprint(value)
+				}
 			}
 		}
 	}
@@ -190,7 +227,9 @@ func (o *Orchestrator) activateFault(ctx context.Context, session *Session, adap
 	faults = append(faults, task.Spec.FaultChain...)
 
 	if len(faults) == 0 {
-		return errors.New("manifest declares neither fault nor fault_chain")
+		// Code-level tasks carry the defect in the scenario workspace;
+		// nothing to inject.
+		return nil
 	}
 	for _, declared := range faults {
 		fault := injector.Fault{
@@ -292,6 +331,37 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
+	// Reset the participant workspace: remove any changes and copy the
+	// broken scenario workspace again so the reset returns to the incident.
+	if session.WorkspaceDir != "" {
+		if err := os.RemoveAll(session.WorkspaceDir); err != nil {
+			return fmt.Errorf("remove workspace: %w", err)
+		}
+		session.mu.Lock()
+		session.WorkspaceDir = ""
+		session.mu.Unlock()
+		if err := o.setupWorkspace(session); err != nil {
+			return fmt.Errorf("re-setup workspace: %w", err)
+		}
+	}
+
+	// Only a code-level fix needs a rebuilt image. Compose Reset restores the
+	// baseline, which already carries the code-level image tag (substituted at
+	// Start). Config-level and db-level tasks don't rebuild images.
+	if session.WorkspaceDir != "" && session.manifest.Metadata.Level == manifest.LevelCode {
+		imageTag, err := o.buildWorkspaceImage(ctx, session)
+		if err != nil {
+			return fmt.Errorf("build workspace image: %w", err)
+		}
+		// A new image changes nothing while the old container keeps running:
+		// the service has to be recreated from it, which is what the restart
+		// asks the adapter to do. Without it the reset of a code-level task
+		// would hand out the participant's fixed image as the incident.
+		if _, err := adapter.Apply(ctx, session.ID, runtime.EnvPatch{Service: "app", Image: imageTag, Restart: true}); err != nil {
+			return fmt.Errorf("apply image tag: %w", err)
+		}
+	}
+
 	instance, err := adapter.Reset(ctx, session.ID)
 	if err != nil {
 		return fmt.Errorf("reset environment: %w", err)
@@ -302,6 +372,7 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 	session.FaultArtifacts = nil
 	session.LastVerdict = ""
 	session.mu.Unlock()
+
 	session.journal.Record(EventReset, "environment restored to baseline", nil)
 
 	// A reset means "back to the incident", so the declared fault has to be
@@ -323,6 +394,71 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 	if err != nil {
 		return err
 	}
+
+	// Write files into the session workspace before rebuilding.
+	if len(patch.Files) > 0 {
+		// Path traversal is a security boundary: reject before anything is
+		// written so no change is applied on a violation.
+		for relPath := range patch.Files {
+			if err := validateFilePath(relPath); err != nil {
+				return fmt.Errorf("invalid file path %q: %w", relPath, err)
+			}
+		}
+
+		// Only files listed in spec.editable may be changed. Dockerfile,
+		// go.mod and go.sum are editable only when the manifest lists them.
+		allowed := make(map[string]bool)
+		for _, e := range session.manifest.Spec.Editable {
+			allowed[e] = true
+		}
+		for relPath := range patch.Files {
+			if !allowed[relPath] {
+				return fmt.Errorf("file %q is not in editable list %v", relPath, session.manifest.Spec.Editable)
+			}
+		}
+
+		if session.WorkspaceDir == "" {
+			return fmt.Errorf("no workspace for session %s", session.ID)
+		}
+
+		// Validate workspace integrity against the scenario before any write:
+		// a changed, added or deleted file outside editable is rejected and the
+		// workspace is left untouched.
+		if err := o.validateEditableFiles(session); err != nil {
+			return fmt.Errorf("editable validation: %w", err)
+		}
+
+		session.journal.Record(EventApplyStarted, "apply started", map[string]any{
+			"service": patch.Service,
+			"files":   patch.Files,
+		})
+
+		for relPath, content := range patch.Files {
+			target := filepath.Join(session.WorkspaceDir, relPath)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("create dir for %s: %w", relPath, err)
+			}
+			if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", relPath, err)
+			}
+		}
+
+		// Only a code-level fix needs a rebuilt image. A config-level or
+		// composite task edits a mounted config file; the adapter writes it into
+		// the compose project and recreates the service. Rebuilding here would
+		// fail because a config workspace has no Dockerfile.
+		if session.manifest.Metadata.Level == manifest.LevelCode {
+			imageTag, err := o.buildWorkspaceImage(ctx, session)
+			if err != nil {
+				return fmt.Errorf("build workspace image: %w", err)
+			}
+			patch.Image = imageTag
+			// Files have been written to the workspace and baked into the image;
+			// don't send them again to the adapter.
+			patch.Files = nil
+		}
+	}
+
 	instance, err := adapter.Apply(ctx, session.ID, patch)
 	if err != nil {
 		session.journal.Record(EventFixFailed, "fix could not be applied", map[string]any{
@@ -336,12 +472,65 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 	session.mu.Lock()
 	session.AppliedFixes = append(session.AppliedFixes, patch)
 	session.mu.Unlock()
+	if patch.Image != "" {
+		session.journal.Record(EventServiceRecreated, "service recreated with new image", map[string]any{
+			"service": patch.Service,
+			"image":   patch.Image,
+		})
+	}
 	session.journal.Record(EventFixApplied, "participant applied a change", map[string]any{
 		"service": patch.Service,
 		"vars":    patch.Vars,
 		"restart": patch.Restart,
 	})
 	return nil
+}
+
+// ExecSQL runs a statement against a database service of a session. It is the
+// participant's write path for a db-level task: `incidentsim apply --sql` ends
+// up here.
+// Exec runs an arbitrary command inside a service of a session.
+//
+// It is the participant's debug path: `incidentsim exec --service app -- sh -c
+// 'cat /etc/app/app.conf'` ends up here, and so does every diagnostic a real
+// incident needs — ps, ss, tcpdump, a manual psql session. The environment is
+// per session and ephemeral, so the debug is as safe as the task itself: a
+// change written inside a container disappears on the next recreate, and only
+// Apply can change what a verification grades.
+func (o *Orchestrator) Exec(ctx context.Context, sessionID, service string, command []string, timeout time.Duration) (runtime.ExecResult, error) {
+	session, err := o.Sessions.Get(sessionID)
+	if err != nil {
+		return runtime.ExecResult{}, err
+	}
+	adapter, err := o.adapterFor(session)
+	if err != nil {
+		return runtime.ExecResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	req := runtime.ExecRequest{
+		Service: service,
+		Command: command,
+		Timeout: timeout,
+	}
+	result, err := adapter.Exec(ctx, session.ID, req)
+	if err == nil && result.ExitCode != 0 {
+		err = fmt.Errorf("command exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	if err != nil {
+		session.journal.Record(EventExecFailed, "command could not be executed", map[string]any{
+			"service": service,
+			"command": command,
+			"error":   err.Error(),
+		})
+		return result, err
+	}
+	session.journal.Record(EventExecRun, "participant ran a command in the environment", map[string]any{
+		"service": service,
+		"command": command,
+	})
+	return result, nil
 }
 
 // ExecSQL runs a statement against a database service of a session. It is the
@@ -552,4 +741,197 @@ func (o *Orchestrator) adapterFor(session *Session) (runtime.Adapter, error) {
 		return nil, fmt.Errorf("engine %q has no adapter", engine)
 	}
 	return adapter, nil
+}
+
+// workspaceDir returns the per-session workspace directory:
+// ~/.incidentsim/sessions/<id>/workspace/
+func (o *Orchestrator) workspaceDir(sessionID string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("user home dir: %w", err)
+	}
+	return filepath.Join(home, ".incidentsim", "sessions", sessionID, "workspace"), nil
+}
+
+// scenarioWorkspaceDir returns the source scenario workspace of a task.
+// It uses spec.workspace from the manifest when declared, falling back to
+// scenarios/<task>/workspace/ for backward compatibility.
+func (o *Orchestrator) scenarioWorkspaceDir(session *Session) string {
+	if session.manifest.Spec.Workspace != "" {
+		return filepath.Join(o.Config.ProjectDir(), session.manifest.Spec.Workspace)
+	}
+	return filepath.Join(o.Config.ProjectDir(), "scenarios", session.TaskID, "workspace")
+}
+
+// setupWorkspace copies the scenario workspace into the session workspace.
+func (o *Orchestrator) setupWorkspace(session *Session) error {
+	src := o.scenarioWorkspaceDir(session)
+	dst, err := o.workspaceDir(session.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(src); err != nil {
+		return nil
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create workspace: %w", err)
+	}
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+	if err != nil {
+		return fmt.Errorf("copy workspace: %w", err)
+	}
+	session.mu.Lock()
+	session.WorkspaceDir = dst
+	session.mu.Unlock()
+	return nil
+}
+
+// validateEditableFiles checks that only files listed in spec.editable were
+// modified in the session workspace compared to the scenario workspace.
+// Files are compared by SHA-256. A file added or deleted outside the
+// editable list is an error, as is a modified one. The check runs on both
+// sides: the session workspace (changes and additions) and the scenario
+// workspace (deletions the dst-side walk cannot see).
+func (o *Orchestrator) validateEditableFiles(session *Session) error {
+	editable := session.manifest.Spec.Editable
+	if len(editable) == 0 {
+		return nil
+	}
+	src := o.scenarioWorkspaceDir(session)
+	dst := session.WorkspaceDir
+	if src == "" || dst == "" {
+		return nil
+	}
+	allowed := make(map[string]bool)
+	for _, e := range editable {
+		allowed[e] = true
+	}
+	var modified []string
+	// Session workspace side: changed or added files outside editable.
+	err := filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dst, path)
+		if err != nil {
+			return err
+		}
+		if allowed[rel] {
+			return nil
+		}
+		scenarioPath := filepath.Join(src, rel)
+		scenarioData, serr := os.ReadFile(scenarioPath)
+		if serr == nil {
+			dstData, derr := os.ReadFile(path)
+			if derr == nil && hashEqual(scenarioData, dstData) {
+				return nil // unchanged from scenario, not a real modification
+			}
+		}
+		modified = append(modified, rel)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("scan workspace: %w", err)
+	}
+	// Scenario side: files present in the scenario but missing from the
+	// session workspace are deletions outside the editable list.
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if allowed[rel] {
+			return nil
+		}
+		if _, err := os.Stat(filepath.Join(dst, rel)); os.IsNotExist(err) {
+			modified = append(modified, rel+" (deleted)")
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("scan scenario: %w", err)
+	}
+	if len(modified) > 0 {
+		return fmt.Errorf("non-editable files changed: %s (only %v are editable)",
+			strings.Join(modified, ", "), editable)
+	}
+	return nil
+}
+
+// hashEqual compares two byte slices by SHA-256 in constant time.
+func hashEqual(a, b []byte) bool {
+	return sha256.Sum256(a) == sha256.Sum256(b)
+}
+
+// buildWorkspaceImage builds a Docker image from the session workspace
+// and returns the image tag.
+func (o *Orchestrator) buildWorkspaceImage(ctx context.Context, session *Session) (string, error) {
+	session.mu.Lock()
+	dst := session.WorkspaceDir
+	session.mu.Unlock()
+	if dst == "" {
+		return "", fmt.Errorf("no workspace for session %s", session.ID)
+	}
+	tag := fmt.Sprintf("incidentsim/workload:session-%s", session.ID)
+	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, ".")
+	cmd.Dir = dst
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		session.journal.Record(EventBuildFailed, "docker build failed", map[string]any{
+			"service": "app",
+			"tag":     tag,
+			"stderr":  stderr.String(),
+		})
+		return "", fmt.Errorf("docker build: %w: %s", err, stderr.String())
+	}
+	session.journal.Record(EventBuildOK, "docker image built", map[string]any{
+		"service": "app",
+		"tag":     tag,
+	})
+	return tag, nil
+}
+
+// validateFilePath rejects absolute paths and any ..-segment so that a
+// patch file can never be written outside the session workspace.
+func validateFilePath(relPath string) error {
+	if filepath.IsAbs(relPath) {
+		return fmt.Errorf("absolute paths are not allowed")
+	}
+	for _, part := range strings.Split(relPath, string(filepath.Separator)) {
+		if part == ".." {
+			return fmt.Errorf("path contains a parent-directory segment")
+		}
+	}
+	if cleaned := filepath.Clean(relPath); cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes the workspace")
+	}
+	return nil
 }

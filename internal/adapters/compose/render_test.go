@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"incidentsim/internal/runtime"
 )
 
@@ -35,7 +37,7 @@ func TestProjectRendersServicesWithFaultEnvWinning(t *testing.T) {
 	spec := testSpec()
 	spec.FaultEnv = map[string]string{"LOG_LEVEL": "debug"}
 
-	document := Project("incidentsim-test", spec)
+	document := Project("incidentsim-test", "incidentsim-test", spec)
 
 	for _, want := range []string{
 		"name: incidentsim-test",
@@ -63,14 +65,14 @@ func TestProjectRendersServicesWithFaultEnvWinning(t *testing.T) {
 
 func TestProjectQuotesNumericEnvValues(t *testing.T) {
 	spec := testSpec()
-	document := Project("incidentsim-test", spec)
+	document := Project("incidentsim-test", "incidentsim-test", spec)
 	if !strings.Contains(section(document, "  app:"), `DB_PORT: "5432"`) {
 		t.Fatalf("numeric env value not quoted:\n%s", document)
 	}
 }
 
 func TestProjectPublishesContainerPortsOnly(t *testing.T) {
-	document := Project("incidentsim-test", testSpec())
+	document := Project("incidentsim-test", "incidentsim-test", testSpec())
 	// Fixed host ports would make two sessions of one task collide on a
 	// developer machine, so the rendering must publish container ports only.
 	if strings.Contains(document, ":5432") && strings.Contains(document, "5432:") {
@@ -78,6 +80,31 @@ func TestProjectPublishesContainerPortsOnly(t *testing.T) {
 	}
 	if strings.Count(document, `- "5432"`) != 1 || strings.Count(document, `- "8080"`) != 1 {
 		t.Fatalf("unexpected port rendering:\n%s", document)
+	}
+}
+
+func TestProjectRendersValidYAMLWithMountedConfig(t *testing.T) {
+	document := Project("/state/incidentsim-test", "incidentsim-test", testSpec())
+
+	// Compose rejects a project its YAML parser cannot read, and a rejected
+	// project is a task that does not start at all — a failure that unit
+	// tests of the individual renderers would never see. Parsing the whole
+	// document here is what keeps that failure in the test suite.
+	var parsed struct {
+		Services map[string]struct {
+			Volumes []string `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(document), &parsed); err != nil {
+		t.Fatalf("compose document is not valid YAML: %v\n%s", err, document)
+	}
+	volumes := parsed.Services["app"].Volumes
+	if len(volumes) != 1 {
+		t.Fatalf("app volumes = %v, want exactly the mounted config file", volumes)
+	}
+	want := "/state/incidentsim-test/config/app.conf:/etc/app/app.conf:ro"
+	if volumes[0] != want {
+		t.Fatalf("volume = %q, want %q: the service must read the file it is graded on", volumes[0], want)
 	}
 }
 

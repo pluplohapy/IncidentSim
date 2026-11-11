@@ -18,6 +18,7 @@ const (
 	VerdictPass    = "pass"
 	VerdictFail    = "fail"
 	VerdictSkipped = "skipped"
+	VerdictPartial = "partial_fix"
 )
 
 // Errors of the verifier subsystem.
@@ -68,6 +69,12 @@ type Check struct {
 	Duration string       `json:"duration,omitempty"`
 	Expect   *Expectation `json:"expect,omitempty"`
 	Reason   string       `json:"reason,omitempty"`
+	// File is the configuration file inside the container a policy check
+	// reads. When set, the check reads that file instead of the process
+	// environment: the file is what the service loads at startup, so a fix
+	// that edits the file must be visible to the check and one that only
+	// touches the environment must not be.
+	File string `json:"file,omitempty"`
 }
 
 // Expectation is the pass condition.
@@ -150,10 +157,11 @@ type Environment interface {
 // ReplayConfig is the load a verification replays. Replaying load is what keeps
 // a task from being "fixed" by stopping the service.
 type ReplayConfig struct {
-	Profile     string `json:"profile,omitempty"`
-	Duration    string `json:"duration,omitempty"`
-	RPS         int    `json:"rps,omitempty"`
-	Concurrency int    `json:"concurrency,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	Duration      string `json:"duration,omitempty"`
+	RPS           int    `json:"rps,omitempty"`
+	Concurrency   int    `json:"concurrency,omitempty"`
+	TargetService string `json:"target_service,omitempty"`
 }
 
 // Verifier grades one run. The first implementation runs manifest checks; the
@@ -202,10 +210,9 @@ func (r *Report) Finalise() {
 	case !r.Correctness.Passed():
 		r.Verdict = VerdictFail
 	default:
-		// The environment works but the fix is not production appropriate:
-		// the run is a partial fix, which is exactly what the quality gate
-		// exists to expose.
-		r.Verdict = VerdictFail
+		// Correctness passes but quality fails: the symptom is hidden but the
+		// root cause survives. This is a partial fix, not a green run.
+		r.Verdict = VerdictPartial
 	}
 }
 

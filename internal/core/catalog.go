@@ -22,6 +22,7 @@ type TaskSummary struct {
 	Correctness      int      `json:"correctness_checks"`
 	Quality          int      `json:"quality_checks"`
 	Distractors      int      `json:"distractors"`
+	Editable         []string `json:"editable,omitempty"`
 	Path             string   `json:"-"`
 }
 
@@ -106,6 +107,7 @@ func (c *Catalog) summariseLocked(m *manifest.Manifest) TaskSummary {
 		Correctness:      len(m.Spec.Verify.Correctness),
 		Quality:          len(m.Spec.Verify.Quality),
 		Distractors:      len(m.Spec.Distractors),
+		Editable:         m.Spec.Editable,
 		Path:             "",
 	}
 }
@@ -124,12 +126,17 @@ func Checks(m *manifest.Manifest) verifier.CheckSet {
 		Correctness: projectChecks(m.Spec.Verify.Correctness, verifier.GateCorrectness),
 		Quality:     projectChecks(m.Spec.Verify.Quality, verifier.GateQuality),
 	}
-	if m.Spec.Replay != nil {
+	replay := m.Spec.Replay
+	if m.Spec.Verify.Replay != nil {
+		replay = m.Spec.Verify.Replay
+	}
+	if replay != nil {
 		set.Replay = &verifier.ReplayConfig{
-			Profile:     m.Spec.Replay.Profile,
-			Duration:    m.Spec.Replay.Duration,
-			RPS:         m.Spec.Replay.RPS,
-			Concurrency: m.Spec.Replay.Concurrency,
+			Profile:       replay.Profile,
+			Duration:      replay.Duration,
+			RPS:           replay.RPS,
+			Concurrency:   replay.Concurrency,
+			TargetService: replay.TargetService,
 		}
 	}
 	return set
@@ -154,6 +161,7 @@ func projectChecks(checks []manifest.Check, gate verifier.Gate) []verifier.Check
 			Duration: check.Duration,
 			Expect:   projectExpectation(check.Expect),
 			Reason:   check.Reason,
+			File:     check.File,
 		})
 	}
 	return out
@@ -184,8 +192,8 @@ func ParseEnvPatch(service string, sets []string, restart bool) (runtime.EnvPatc
 		}
 		patch.Vars[key] = value
 	}
-	if len(patch.Vars) == 0 {
-		return patch, fmt.Errorf("no --set given: a fix must change at least one variable")
-	}
+	// --set is optional: a fix may arrive purely as --file / --file-from-reference.
+	// The caller (main.go apply) rejects the fully-empty patch before reaching
+	// here, so an empty vars map is a valid patch at this layer.
 	return patch, nil
 }

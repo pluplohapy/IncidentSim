@@ -98,7 +98,7 @@ func TestRenderIncludesPartialFixCallout(t *testing.T) {
 			{At: time.Now().UTC(), Type: EventFaultActivated, Message: "fault activated"},
 			{At: time.Now().UTC(), Type: EventFixApplied, Message: "applied LOG_LEVEL=info"},
 		},
-		Verdicts:       []VerdictEntry{{At: time.Now().UTC(), Verdict: verifier.VerdictFail, Correctness: verifier.VerdictPass, Quality: verifier.VerdictFail, Note: "replay: 0 errors"}},
+		Verdicts:       []VerdictEntry{{At: time.Now().UTC(), Verdict: verifier.VerdictPartial, Correctness: verifier.VerdictPass, Quality: verifier.VerdictFail, Note: "replay: 0 errors"}},
 		PartialFix:     true,
 		PartialFixNote: "Система работает, но корневая причина осталась.",
 	}
