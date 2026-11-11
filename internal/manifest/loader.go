@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -558,6 +560,13 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 			}
 			rel, _ := filepath.Rel(workspace, path)
 			workspaceFiles[rel] = true
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if spoiler := workspaceSpoiler(string(data)); spoiler != "" {
+				issues = append(issues, Issue{Field: field + ".workspace", Message: fmt.Sprintf("workspace file %q contains spoiler marker %q", rel, spoiler)})
+			}
 			return nil
 		})
 		referenceFiles := map[string]bool{}
@@ -613,6 +622,22 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 	}
 	return nil
 }
+
+// workspaceSpoiler rejects answer-bearing comments and names from a participant
+// workspace. Reference material is intentionally exempt: it is never exposed
+// before pass or give-up.
+func workspaceSpoiler(contents string) string {
+	if !utf8.ValidString(contents) {
+		return ""
+	}
+	match := workspaceSpoilerPattern.FindStringSubmatch(strings.ToLower(contents))
+	if len(match) == 2 {
+		return match[1]
+	}
+	return ""
+}
+
+var workspaceSpoilerPattern = regexp.MustCompile(`\b(bug|broken|fixme|leak)\b`)
 
 // referenceDiffWithinBudget checks that reference and workspace differ only in
 // editable files and that the unified diff is ≤ 40 lines.

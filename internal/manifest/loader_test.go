@@ -308,3 +308,12 @@ func TestSchemaIsReachableAndCompiles(t *testing.T) {
 		t.Fatalf("embedded schema does not compile: %v", err)
 	}
 }
+
+func TestWorkspaceSpoiler(t *testing.T) {
+	if got := workspaceSpoiler("package main\n// cleanup"); got != "" {
+		t.Fatalf("workspaceSpoiler(clean source) = %q", got)
+	}
+	if got := workspaceSpoiler("// BROKEN implementation"); got != "broken" {
+		t.Fatalf("workspaceSpoiler(spoiler) = %q, want broken", got)
+	}
+}
