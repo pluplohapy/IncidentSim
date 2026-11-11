@@ -822,7 +822,7 @@ func (o *Orchestrator) workspaceDiffText(session *Session) (string, error) {
 		dstData, derr := os.ReadFile(filepath.Join(dst, rel))
 		switch {
 		case serr != nil:
-			fmt.Fprintf(&diff, "--- %s\n+++ /dev/null\n@@\n- %s\n", rel, string(scenarioData))
+			return serr
 		case derr != nil:
 			fmt.Fprintf(&diff, "--- /dev/null\n+++ %s\n@@\n+ %s\n", rel, string(scenarioData))
 		default:

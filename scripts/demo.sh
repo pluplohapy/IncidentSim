@@ -91,7 +91,9 @@ case "$TASK" in
     echo "таблица очищена, autovacuum отключён и данные потеряны"
     ;;
   cache-avalanche-retry-storm)
-    ./bin/incidentsim apply "$SESSION" --service app --set RETRY_ENABLED=false >/dev/null
+    curl -fsS -X POST "http://$ADDR/api/v1/sessions/$SESSION/distractor" \
+      -H 'Content-Type: application/json' \
+      -d '{"distractor_id":"disable-retry"}' >/dev/null
     echo "ретраи отключены: storm исчез, устойчивость тоже"
     ;;
 esac

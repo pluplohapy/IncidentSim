@@ -92,7 +92,9 @@ func (s *Stub) Records() []core.SessionRecord {
 	return append([]core.SessionRecord(nil), s.records...)
 }
 
-// Client uploads recordings to a Teleport deployment.
+// Client is an experimental HTTP recorder. The endpoint and payload are kept
+// configurable because this repository has not validated them against a real
+// Teleport cluster; enabling it must therefore be treated as best effort.
 type Client struct {
 	Config Config
 	HTTP   *http.Client
@@ -115,10 +117,9 @@ func (c *Client) Name() string { return "teleport" }
 
 // Record implements the audit recorder.
 //
-// The upload is a POST to the Teleport audit endpoint. A failure is reported to
-// the caller so the deployment can alert on it, but the caller must treat a
-// failure as a warning: a recording that did not upload is an audit gap, not a
-// broken session.
+// Record sends the experimental wire payload. A failure is reported to the
+// caller so the deployment can alert on it, but must be treated as a warning:
+// an unverified audit integration is an audit gap, not a broken session.
 func (c *Client) Record(ctx context.Context, record core.SessionRecord) error {
 	payload, err := json.Marshal(toWire(record))
 	if err != nil {
@@ -141,7 +142,7 @@ func (c *Client) Record(ctx context.Context, record core.SessionRecord) error {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload to teleport: %w", err)
+		return fmt.Errorf("teleport audit request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
@@ -151,7 +152,8 @@ func (c *Client) Record(ctx context.Context, record core.SessionRecord) error {
 	return nil
 }
 
-// toWire projects the core's record into the shape Teleport expects.
+// toWire projects the core record into the experimental payload shape. It is
+// intentionally conservative until a real Teleport deployment validates it.
 func toWire(record core.SessionRecord) SessionRecord {
 	return SessionRecord{
 		SessionID: record.SessionID,
