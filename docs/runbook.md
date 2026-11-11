@@ -24,9 +24,14 @@ Firecracker — отдельный продуктовый движок, одна
 ```console
 ansible-playbook -i ansible/inventory.example.yml ansible/firecracker.yml
 INCIDENTSIM_CONFIG=incidentsim-firecracker.yaml bin/incidentsim serve
-bin/incidentsim selfcheck db-connection-leak
+INCIDENTSIM_ADMIN=1 bin/incidentsim selfcheck db-connection-leak --engine firecracker
 ```
 
 На реальном KVM-хосте этот checkout не проверен. Если KVM или Firecracker
 отсутствует, адаптер возвращает `ErrUnsupported` с подсказкой использовать
 Compose.
+
+Проверка синтаксиса Ansible выполняется `make ansible-check`; локально нужен
+`ansible-playbook` и коллекции `community.general`, `ansible.posix`. В среде
+без Ansible эта команда завершается ошибкой отсутствующей зависимости, а не
+имитирует успешную проверку.

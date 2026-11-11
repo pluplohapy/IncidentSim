@@ -8,7 +8,7 @@
 |------|-------|
 | [`firecracker.yml`](firecracker.yml) | главный playbook: установка, сеть, systemd и rootfs |
 | [`inventory.example.yml`](inventory.example.yml) | пример инвентаря bare-metal хоста |
-| `roles/firecracker/tasks/main.yml` | мост, tap-устройства и экспорт rootfs |
+| `roles/firecracker/tasks/main.yml` | мост и tap-устройства |
 | `roles/firecracker/defaults/main.yml` | пути; они же, что в `incidentsim.yaml` |
 | `roles/firecracker/templates/` | сеть, core и per-VM systemd-юниты |
 
@@ -26,8 +26,9 @@ engine: firecracker
 firecracker:
   firecracker_bin: /usr/local/bin/firecracker
   socket_dir: /var/lib/incidentsim/vms
-  kernel_image: /var/lib/incidentsim/rootfs/vmlinux
-  rootfs_image: /var/lib/incidentsim/rootfs/incidentsim_workload.squashfs
+  kernel_image: /var/lib/incidentsim/vmlinux
+  rootfs_dir: /var/lib/incidentsim/rootfs
+  version: 1.11.0
   guest_agent_port: 51000
 ```
 
@@ -46,8 +47,9 @@ firecracker:
 
 Мост `incbr0` с адресом 172.30.0.1/24, tap-устройства `incidentsim-tap0..N`.
 У гостя нет маршрута наружу: участник не может унести данные задачи или
-достать интернет из тренажёра. Хост достаёт гостя через vsock-агент
-(`incidentsim-guest`), а не через сеть.
+достать интернет из тренажёра. Хост управляет гостем через vsock-агент
+(`incidentsim-guest`), а HTTP-проверки идут по закрытой host-only сети на
+фиксированный IP гостя.
 
 ## Reset
 
