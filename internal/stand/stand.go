@@ -155,6 +155,7 @@ type State struct {
 	logVolumeB     int64
 	dbReachable    bool
 	dbLatencyP95   time.Duration
+	queriesPerReq  float64
 	dbDeadTuples   int
 	dbRows         int
 }
@@ -216,6 +217,15 @@ func (s *State) SetDBLatencyP95(d time.Duration) {
 	s.dbLatencyP95 = d
 }
 
+// SetQueriesPerRequest publishes the handler's own EWMA of database queries
+// per served request. It is how an N+1 or a stampede becomes visible as a
+// gauge instead of a ratio the quality gate cannot express.
+func (s *State) SetQueriesPerRequest(n float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queriesPerReq = n
+}
+
 // SetDBTableStats publishes real table statistics (dead tuples, live rows)
 // read from pg_stat_user_tables.
 func (s *State) SetDBTableStats(deadTuples, rows int) {
@@ -235,16 +245,16 @@ func (s *State) SetDBReachable(ok bool, latency time.Duration) {
 	}
 }
 
-func (s *State) snapshot() (requests, errors, dbQueriesTotal, depCalls, cacheEntries, cacheHits, retries int64, diskPct float64, logVolumeB int64, dbReachable bool, dbLatencyP95 time.Duration, dbDeadTuples, dbRows int) {
+func (s *State) snapshot() (requests, errors, dbQueriesTotal, depCalls, cacheEntries, cacheHits, retries int64, diskPct, queriesPerReq float64, logVolumeB int64, dbReachable bool, dbLatencyP95 time.Duration, dbDeadTuples, dbRows int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.requests, s.errors, s.dbQueriesTotal, s.depCalls, s.cacheEntries, s.cacheHits, s.retries, s.diskPct, s.logVolumeB, s.dbReachable, s.dbLatencyP95, s.dbDeadTuples, s.dbRows
+	return s.requests, s.errors, s.dbQueriesTotal, s.depCalls, s.cacheEntries, s.cacheHits, s.retries, s.diskPct, s.queriesPerReq, s.logVolumeB, s.dbReachable, s.dbLatencyP95, s.dbDeadTuples, s.dbRows
 }
 
 // MetricsHandler returns a Prometheus-text metrics handler for the stand.
 func MetricsHandler(state *State, logFile string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requests, errors, dbQueriesTotal, depCalls, cacheEntries, cacheHits, retries, diskPct, logVolumeB, dbReachable, dbLatencyP95, dbDeadTuples, dbRows := state.snapshot()
+		requests, errors, dbQueriesTotal, depCalls, cacheEntries, cacheHits, retries, diskPct, queriesPerReq, logVolumeB, dbReachable, dbLatencyP95, dbDeadTuples, dbRows := state.snapshot()
 		var goroutines int64 = int64(runtime.NumGoroutine())
 		var openFDs int64
 		if f, err := os.Open("/proc/self/fd"); err == nil {
@@ -273,6 +283,7 @@ func MetricsHandler(state *State, logFile string) http.HandlerFunc {
 		fmt.Fprintf(w, "# HELP app_log_bytes bytes written by the logger\n# TYPE app_log_bytes counter\napp_log_bytes %d\n", logVolumeB)
 		fmt.Fprintf(w, "# HELP app_db_reachable whether the database answered\n# TYPE app_db_reachable gauge\napp_db_reachable %d\n", boolToInt(dbReachable))
 		fmt.Fprintf(w, "# HELP app_db_query_latency_p95_ms measured order-query latency\n# TYPE app_db_query_latency_p95_ms gauge\napp_db_query_latency_p95_ms %d\n", dbLatencyP95.Milliseconds())
+		fmt.Fprintf(w, "# HELP app_db_queries_per_request database queries per served request (handler EWMA)\n# TYPE app_db_queries_per_request gauge\napp_db_queries_per_request %.2f\n", queriesPerReq)
 		fmt.Fprintf(w, "# HELP app_db_dead_tuples dead tuples the table statistics report\n# TYPE app_db_dead_tuples gauge\napp_db_dead_tuples %d\n", dbDeadTuples)
 		fmt.Fprintf(w, "# HELP app_db_rows rows in the orders table\n# TYPE app_db_rows gauge\napp_db_rows %d\n", dbRows)
 		fmt.Fprintf(w, "# HELP app_retry_requests requests answered after retries\n# TYPE app_retry_requests counter\napp_retry_requests %d\n", retries)

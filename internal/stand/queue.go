@@ -50,8 +50,12 @@ func (q *JobQueue) Enqueue(payload string) error {
 
 // Process runs the worker loop: it claims pending jobs, processes them, and
 // either marks them done or moves them to dead_letters after too many attempts.
-// A poison payload makes the worker panic unless recover() is used — this is
-// the queue-poison-message incident surface.
+//
+// The loop itself recovers so a panicking task handler cannot kill the
+// service: the panic grammar (recover inside the task's process function,
+// attempts, dead letters) is the participant's fix, not the stand's. A
+// payload the task function panics on therefore re-appears every tick until
+// the handler learns to contain it.
 func (q *JobQueue) Process(process func(payload string) error) {
 	q.mu.Lock()
 	if q.running {
@@ -65,12 +69,25 @@ func (q *JobQueue) Process(process func(payload string) error) {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			q.processOnce(process)
+			q.processOnceSafely(process)
 		}
 	}()
 }
 
-// processOnce claims one pending job and processes it.
+// processOnceSafely runs one job with the loop-level guard. The guard keeps
+// the service alive; it deliberately does NOT complete or dead-letter the
+// job, because that is the fix the participant writes.
+func (q *JobQueue) processOnceSafely(process func(payload string) error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("worker panicked: %v (the task handler must contain this)", r)
+		}
+	}()
+	q.processOnce(process)
+}
+
+// processOnce claims one pending job and processes it. A panic from the task
+// function propagates to the loop guard above.
 func (q *JobQueue) processOnce(process func(payload string) error) {
 	var id int
 	var payload string
@@ -92,21 +109,11 @@ func (q *JobQueue) processOnce(process func(payload string) error) {
 	q.state.dbQueriesTotal++
 	q.state.mu.Unlock()
 
-	// Process with recover: a poison payload panics the worker, which is the
-	// incident. The fix recovers, increments attempts, and dead-letters.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				q.failJob(id, fmt.Sprintf("panic: %v", r))
-				log.Printf("job %d panicked: %v", id, r)
-			}
-		}()
-		if err := process(payload); err != nil {
-			q.failJob(id, err.Error())
-			return
-		}
-		q.doneJob(id)
-	}()
+	if err := process(payload); err != nil {
+		q.failJob(id, err.Error())
+		return
+	}
+	q.doneJob(id)
 }
 
 func (q *JobQueue) doneJob(id int) {
