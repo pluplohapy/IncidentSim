@@ -24,6 +24,11 @@ jobs:
       - name: Download modules
         run: go mod download
 
+      - name: Check generated stand workspaces
+        run: |
+          ./scripts/sync-stand.sh
+          git diff --exit-code
+
       - name: Build
         run: go build -v ./...
 
