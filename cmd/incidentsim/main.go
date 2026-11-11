@@ -657,6 +657,7 @@ func validateCmd(args []string) error {
 
 func selfcheckCmd(args []string) error {
 	fs := flag.NewFlagSet("selfcheck", flag.ExitOnError)
+	engine := fs.String("engine", "compose", "движок selfcheck: compose или firecracker")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -664,7 +665,10 @@ func selfcheckCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := selfcheckpkg.Contract(context.Background(), client(nil), task)
+	if *engine != "compose" && *engine != "firecracker" {
+		return fmt.Errorf("unsupported selfcheck engine %q", *engine)
+	}
+	res, err := selfcheckpkg.ContractForEngine(context.Background(), client(nil), task, *engine)
 	if err != nil {
 		return err
 	}

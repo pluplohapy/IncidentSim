@@ -194,6 +194,17 @@ func Contract(ctx context.Context, api *cli.Client, taskID string) (*Result, err
 	return res, nil
 }
 
+// ContractForEngine records the engine selected by the caller. The core API
+// remains the source of truth for the actually running adapter; this parameter
+// makes CI output explicit when the same selfcheck is run in an engine matrix.
+func ContractForEngine(ctx context.Context, api *cli.Client, taskID, engine string) (*Result, error) {
+	result, err := Contract(ctx, api, taskID)
+	if engine != "" {
+		result.Engine = engine
+	}
+	return result, err
+}
+
 // Print prints a human-readable selfcheck result.
 func (r *Result) Print(out io.Writer) {
 	fmt.Fprintf(out, "=== selfcheck %s (engine=%s) ===\n", r.TaskID, r.Engine)
