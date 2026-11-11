@@ -611,3 +611,37 @@ func TestValidateFilePathRejectsTraversal(t *testing.T) {
 var _ = runtime.ErrNotFound
 
 var _ = manifest.APIVersion
+
+func TestAdminReloadPicksUpNewTask(t *testing.T) {
+	orchestrator, _, teardown := newTestOrchestrator(t)
+	defer teardown()
+
+	api := httptest.NewServer(NewServer(orchestrator).Handler())
+	defer api.Close()
+
+	// Without INCIDENTSIM_ADMIN the endpoint must refuse.
+	if resp, err := http.Post(api.URL+"/api/v1/admin/reload", "", nil); err != nil {
+		t.Fatalf("post reload: %v", err)
+	} else if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status without admin = %d, want 403", resp.StatusCode)
+	}
+
+	// A task added while the core runs is invisible until a reload.
+	writeFile(t, filepath.Join(orchestrator.Catalog.loader.Dir, "later-task.yaml"), strings.Replace(testManifest, "fixture-task", "later-task", 1))
+	if _, err := orchestrator.Catalog.Load("later-task"); err == nil {
+		t.Fatal("task visible before reload")
+	}
+
+	t.Setenv("INCIDENTSIM_ADMIN", "1")
+	resp, err := http.Post(api.URL+"/api/v1/admin/reload", "", nil)
+	if err != nil {
+		t.Fatalf("post reload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reload status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := orchestrator.Catalog.Load("later-task"); err != nil {
+		t.Fatalf("task not visible after reload: %v", err)
+	}
+}

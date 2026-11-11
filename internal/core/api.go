@@ -45,9 +45,34 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/tasks", s.handleTasks)
 	mux.HandleFunc("/api/v1/tasks/", s.handleTaskDetail)
 	mux.HandleFunc("/api/v1/admin/tasks/", s.handleAdminTaskDetail)
+	mux.HandleFunc("/api/v1/admin/reload", s.handleAdminReload)
 	mux.HandleFunc("/api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/api/v1/sessions/", s.handleSession)
 	return logging(mux)
+}
+
+// handleAdminReload re-reads the catalog directory. The Catalog documents
+// on-demand reload, and without this endpoint that promise is unreachable:
+// a task added while the core runs was invisible until a restart. A failed
+// reload keeps the previous catalog: a half-written manifest must not take
+// the core down.
+func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "")
+		return
+	}
+	if !s.adminEnabled() {
+		writeError(w, http.StatusForbidden, "admin endpoint requires INCIDENTSIM_ADMIN=1", "")
+		return
+	}
+	if err := s.Orchestrator.Catalog.Reload(); err != nil {
+		writeError(w, http.StatusBadGateway, "catalog reload failed (previous catalog kept)", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reloaded": true,
+		"tasks":    len(s.Orchestrator.Catalog.IDs()),
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
