@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -17,7 +18,8 @@ func testSpec() runtime.Spec {
 				Name:  "db",
 				Image: "postgres:16-alpine",
 				Env:   map[string]string{"POSTGRES_DB": "orders"},
-				Ports: []int{5432},
+				// The database is reached through exec (SQL) and the Docker
+				// internal network; its port is not published to the host.
 			},
 			{
 				Name:  "app",
@@ -45,8 +47,7 @@ func TestProjectRendersServicesWithFaultEnvWinning(t *testing.T) {
 		"image: incidentsim/workload:dev",
 		"restart: unless-stopped",
 		"healthcheck:",
-		`- "5432"`,
-		`- "8080"`,
+		`- "127.0.0.1::8080"`,
 	} {
 		if !strings.Contains(document, want) {
 			t.Fatalf("compose document missing %q:\n%s", want, document)
@@ -73,13 +74,19 @@ func TestProjectQuotesNumericEnvValues(t *testing.T) {
 
 func TestProjectPublishesContainerPortsOnly(t *testing.T) {
 	document := Project("incidentsim-test", "incidentsim-test", testSpec())
-	// Fixed host ports would make two sessions of one task collide on a
-	// developer machine, so the rendering must publish container ports only.
-	if strings.Contains(document, ":5432") && strings.Contains(document, "5432:") {
-		t.Fatalf("compose document still maps a host port:\n%s", document)
-	}
-	if strings.Count(document, `- "5432"`) != 1 || strings.Count(document, `- "8080"`) != 1 {
-		t.Fatalf("unexpected port rendering:\n%s", document)
+	// Ports are published on loopback with an ephemeral host port
+	// (127.0.0.1::<container>): no fixed host:<container> mapping, so two
+	// sessions of one task never collide on a developer machine.
+	for _, port := range []int{8080} {
+		want := fmt.Sprintf(`- "127.0.0.1::%d"`, port)
+		if strings.Count(document, want) != 1 {
+			t.Fatalf("compose document does not publish port %d once:\n%s", port, document)
+		}
+		// A fixed host port mapping would look like "8080:8080"; it must not
+		// appear anywhere.
+		if strings.Contains(document, fmt.Sprintf("%d:", port)) {
+			t.Fatalf("compose document maps a fixed host port for %d:\n%s", port, document)
+		}
 	}
 }
 

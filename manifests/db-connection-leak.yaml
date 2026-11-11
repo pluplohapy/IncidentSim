@@ -18,7 +18,8 @@ spec:
       env:
         POSTGRES_PASSWORD: incidentsim
         POSTGRES_DB: orders
-      ports: [5432]
+      # SQL access goes through exec inside the container, not a published
+      # port; the port is intentionally not published to the host.
     - name: app
       image: incidentsim/workload:dev
       env:

@@ -20,6 +20,11 @@ import (
 	"incidentsim/internal/verifier"
 )
 
+// ErrOperationInProgress is returned when a session already has an
+// apply/verify/reset/stop in progress and a second concurrent operation
+// arrives. The HTTP layer turns it into a 409 conflict.
+var ErrOperationInProgress = errors.New("operation in progress")
+
 // Orchestrator runs the task lifecycle: it provisions an environment, breaks
 // it as the manifest declares, and grades the participant's fix.
 //
@@ -41,6 +46,10 @@ type Orchestrator struct {
 	mu sync.Mutex
 	// sequence keeps session ids monotonic inside a process.
 	sequence int
+	// ops tracks per-session operations that are in progress, so concurrent
+	// apply/verify/reset/stop on the same session serialize with a 409
+	// instead of interleaving.
+	ops map[string]bool
 }
 
 // New returns an orchestrator with the given engine set. The injector registry
@@ -68,6 +77,7 @@ func New(config Config, catalog *Catalog, adapters map[string]runtime.Adapter, i
 		Adapters:  adapters,
 		Injectors: injectors,
 		Verifier:  grader,
+		ops:       map[string]bool{},
 	}, nil
 }
 
@@ -77,6 +87,26 @@ func adapterNames(adapters map[string]runtime.Adapter) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// beginOp marks a session as having an operation in progress. A second
+// caller for the same session gets ErrOperationInProgress, which the HTTP
+// layer renders as a 409 conflict.
+func (o *Orchestrator) beginOp(sessionID string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.ops[sessionID] {
+		return ErrOperationInProgress
+	}
+	o.ops[sessionID] = true
+	return nil
+}
+
+// endOp releases the in-progress mark for a session.
+func (o *Orchestrator) endOp(sessionID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.ops, sessionID)
 }
 
 // Start begins a task: it provisions the environment, activates the declared
@@ -115,12 +145,24 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 
 	journal.Record(EventSessionStarted, "session started", map[string]any{"task": taskID, "engine": engine})
 
+	// Any failure after the session is registered must clean up: the workspace,
+	// the environment (compose project / Firecracker VM), the session image and
+	// the session entry itself, so a failed Start leaves nothing behind.
+	cleanup := func() {
+		_ = adapter.Down(ctx, sessionID)
+		_ = o.removeSessionImage(ctx, sessionID)
+		if session.WorkspaceDir != "" {
+			_ = os.RemoveAll(session.WorkspaceDir)
+		}
+		o.Sessions.Remove(sessionID)
+	}
+
 	// For code-level tasks, copy the broken scenario workspace into
-	// ~/.incidentsim/sessions/<id>/workspace/ so the participant can edit it.
+	// <StateDir>/sessions/<id>/workspace/ so the participant can edit it.
 	if err := o.setupWorkspace(session); err != nil {
-		session.SetState(StateFailed)
+		cleanup()
 		journal.Record(EventFaultFailed, "workspace setup failed", map[string]any{"error": err.Error()})
-		return session, fmt.Errorf("setup workspace: %w", err)
+		return nil, fmt.Errorf("setup workspace: %w", err)
 	}
 
 	spec := o.runtimeSpec(task)
@@ -133,9 +175,9 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 	if session.WorkspaceDir != "" && task.Metadata.Level == manifest.LevelCode {
 		imageTag, err := o.buildWorkspaceImage(ctx, session)
 		if err != nil {
-			session.SetState(StateFailed)
+			cleanup()
 			journal.Record(EventFaultFailed, "workspace image build failed", map[string]any{"error": err.Error()})
-			return session, fmt.Errorf("build workspace image: %w", err)
+			return nil, fmt.Errorf("build workspace image: %w", err)
 		}
 		for i := range spec.Services {
 			if spec.Services[i].Name == "app" {
@@ -147,9 +189,9 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 
 	instance, err := adapter.Up(ctx, sessionID, spec)
 	if err != nil {
-		session.SetState(StateFailed)
+		cleanup()
 		journal.Record(EventFaultFailed, "environment failed to start", map[string]any{"error": err.Error()})
-		return session, fmt.Errorf("start environment: %w", err)
+		return nil, fmt.Errorf("start environment: %w", err)
 	}
 	session.mu.Lock()
 	session.instance = instance
@@ -160,9 +202,10 @@ func (o *Orchestrator) Start(ctx context.Context, taskID string) (*Session, erro
 	if err := o.activateFault(ctx, session, adapter); err != nil {
 		// A fault that cannot be activated is a broken task, not a broken
 		// session: fail loudly instead of handing out a healthy environment.
+		cleanup()
 		session.SetState(StateFailed)
 		journal.Record(EventFaultFailed, "fault could not be activated", map[string]any{"error": err.Error()})
-		return session, fmt.Errorf("activate fault: %w", err)
+		return nil, fmt.Errorf("activate fault: %w", err)
 	}
 	return session, nil
 }
@@ -298,6 +341,11 @@ func envPatchFromFault(fault manifest.FaultSpec) (runtime.EnvPatch, bool) {
 
 // Verify grades the current state of a session.
 func (o *Orchestrator) Verify(ctx context.Context, sessionID string) (verifier.Report, error) {
+	if err := o.beginOp(sessionID); err != nil {
+		return verifier.Report{}, err
+	}
+	defer o.endOp(sessionID)
+
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return verifier.Report{}, err
@@ -323,6 +371,11 @@ func (o *Orchestrator) Verify(ctx context.Context, sessionID string) (verifier.R
 
 // Reset restores the baseline environment of a session.
 func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
+	if err := o.beginOp(sessionID); err != nil {
+		return err
+	}
+	defer o.endOp(sessionID)
+
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return err
@@ -386,6 +439,11 @@ func (o *Orchestrator) Reset(ctx context.Context, sessionID string) error {
 
 // Apply pushes a participant fix into the environment.
 func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtime.EnvPatch) error {
+	if err := o.beginOp(sessionID); err != nil {
+		return err
+	}
+	defer o.endOp(sessionID)
+
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return err
@@ -645,6 +703,11 @@ func (o *Orchestrator) Hint(sessionID string, level int) (manifest.Hint, bool, e
 
 // Stop tears the environment of a session down and keeps the journal.
 func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
+	if err := o.beginOp(sessionID); err != nil {
+		return err
+	}
+	defer o.endOp(sessionID)
+
 	session, err := o.Sessions.Get(sessionID)
 	if err != nil {
 		return err
@@ -654,12 +717,42 @@ func (o *Orchestrator) Stop(ctx context.Context, sessionID string) error {
 		return err
 	}
 	downErr := adapter.Down(ctx, session.ID)
+	// The participant workspace lives under the state dir; stop removes it so
+	// no scratch files survive the session.
+	if session.WorkspaceDir != "" {
+		if rerr := os.RemoveAll(session.WorkspaceDir); rerr != nil && downErr == nil {
+			downErr = fmt.Errorf("remove workspace: %w", rerr)
+		}
+	}
+	// A code-level task baked a session image; drop it on teardown.
+	if session.manifest != nil && session.manifest.Metadata.Level == manifest.LevelCode {
+		if rerr := o.removeSessionImage(ctx, sessionID); rerr != nil && downErr == nil {
+			downErr = fmt.Errorf("remove session image: %w", rerr)
+		}
+	}
 	session.journal.Record(EventTeardown, "environment torn down", nil)
 	session.SetState(StateTornDown)
 	o.audit(session, EventSessionFinished)
 	session.journal.Close()
 	o.Sessions.Remove(session.ID)
 	return downErr
+}
+
+// removeSessionImage drops the docker image baked from a code-level session
+// workspace. It is best-effort: a missing image or a missing docker binary
+// must not fail teardown.
+func (o *Orchestrator) removeSessionImage(ctx context.Context, sessionID string) error {
+	tag := fmt.Sprintf("incidentsim/workload:session-%s", sessionID)
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "rmi", "-f", tag)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker rmi %s: %w: %s", tag, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // audit records a session event for the configured backend. It never fails the
@@ -741,13 +834,9 @@ func (o *Orchestrator) adapterFor(session *Session) (runtime.Adapter, error) {
 }
 
 // workspaceDir returns the per-session workspace directory:
-// ~/.incidentsim/sessions/<id>/workspace/
+// <StateDir>/sessions/<id>/workspace/.
 func (o *Orchestrator) workspaceDir(sessionID string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("user home dir: %w", err)
-	}
-	return filepath.Join(home, ".incidentsim", "sessions", sessionID, "workspace"), nil
+	return filepath.Join(o.Config.StateDir(), "sessions", sessionID, "workspace"), nil
 }
 
 // scenarioWorkspaceDir returns the source scenario workspace of a task.

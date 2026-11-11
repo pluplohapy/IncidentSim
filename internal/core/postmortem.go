@@ -89,9 +89,17 @@ func (o *Orchestrator) loadPostmortemFromJournal(sessionID string) (Postmortem, 
 	if err != nil {
 		return Postmortem{}, err
 	}
+	// The task id is recorded in the session.started event payload. Parsing it
+	// from the session id (everything before the first dash) is wrong for task
+	// ids that themselves contain dashes, e.g. db-connection-leak -> "db".
 	taskID := sessionID
-	if dash := strings.Index(sessionID, "-"); dash > 0 {
-		taskID = sessionID[:dash]
+	for _, event := range journal.Events() {
+		if event.Type == EventSessionStarted {
+			if t, ok := event.Data["task"].(string); ok && t != "" {
+				taskID = t
+			}
+			break
+		}
 	}
 	m, err := o.Catalog.Load(taskID)
 	if err != nil {

@@ -65,7 +65,9 @@ func writeService(b *strings.Builder, projectDir string, service runtime.Service
 	if len(service.Ports) > 0 {
 		b.WriteString("    ports:\n")
 		for _, port := range service.Ports {
-			b.WriteString(fmt.Sprintf("      - \"%d\"\n", port))
+			// Publish on loopback only: two sessions must not collide, and the
+			// host must not expose task ports to the network.
+			b.WriteString(fmt.Sprintf("      - \"127.0.0.1::%d\"\n", port))
 		}
 	}
 
@@ -90,7 +92,7 @@ func writeService(b *strings.Builder, projectDir string, service runtime.Service
 		if timeout <= 0 {
 			timeout = 3
 		}
-		b.WriteString(fmt.Sprintf("    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -fsS http://127.0.0.1:%d%s || exit 1\"]\n      interval: %ds\n      timeout: %ds\n      retries: 10\n",
+		b.WriteString(fmt.Sprintf("    healthcheck:\n      test: [\"CMD-SHELL\", \"wget -q --spider http://127.0.0.1:%d%s || exit 1\"]\n      interval: %ds\n      timeout: %ds\n      retries: 10\n",
 			service.Healthcheck.Port, service.Healthcheck.Path, interval, timeout))
 	}
 

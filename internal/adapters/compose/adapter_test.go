@@ -143,8 +143,13 @@ func TestComposeFullLifecycle(t *testing.T) {
 	if len(instance.Services) != 2 {
 		t.Fatalf("services = %+v", instance.Services)
 	}
-	if instance.Services[0].Endpoint == "" {
-		t.Fatal("no resolved endpoint for db")
+	// The database is not published to the host (SQL goes through exec), so
+	// only the app service carries a host endpoint.
+	if instance.Services[0].Endpoint != "" {
+		t.Fatalf("db should not publish a host port, got %q", instance.Services[0].Endpoint)
+	}
+	if instance.Services[1].Endpoint == "" {
+		t.Fatal("no resolved endpoint for app")
 	}
 
 	samples, err := adapter.Metrics(ctx, "integration-session", "")
