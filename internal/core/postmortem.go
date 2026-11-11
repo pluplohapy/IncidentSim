@@ -42,6 +42,10 @@ type Postmortem struct {
 
 	// HintsUsed counts how much help the participant needed.
 	HintsUsed int `json:"hints_used"`
+	// TTD is time to the first diagnostic command; TTR is time to first pass.
+	TTD         string `json:"ttd,omitempty"`
+	TTR         string `json:"ttr,omitempty"`
+	VerifyCount int    `json:"verify_count"`
 	// AppliedFixes are the participant's changes, oldest first.
 	AppliedFixes []string `json:"applied_fixes"`
 
@@ -106,11 +110,13 @@ func (o *Orchestrator) loadPostmortemFromJournal(sessionID string) (Postmortem, 
 		return Postmortem{}, fmt.Errorf("no manifest for %q: %w", taskID, err)
 	}
 	postmortem := postmortemSkeleton(sessionID, m)
+	postmortem.StartedAt = firstEventTime(journal.Events(), EventSessionStarted)
 	postmortem.Timeline = timeline(journal.Events())
 	postmortem.Verdicts = verdicts(journal.Events())
 	postmortem.FinishedAt = lastEventTime(journal.Events())
 	postmortem.Duration = humanDuration(postmortem.StartedAt, postmortem.FinishedAt)
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(journal.Events())
+	postmortem.applyStats(journal.Events())
 	return postmortem, nil
 }
 
@@ -131,7 +137,24 @@ func (o *Orchestrator) postmortemFrom(session *Session) (Postmortem, error) {
 		postmortem.AppliedFixes = append(postmortem.AppliedFixes, describePatch(patch))
 	}
 	postmortem.PartialFix, postmortem.PartialFixNote = partialFixFrom(events)
+	postmortem.applyStats(events)
 	return postmortem, nil
+}
+
+func (p *Postmortem) applyStats(events []Event) {
+	for _, event := range events {
+		switch event.Type {
+		case EventExecRun:
+			if p.TTD == "" && !p.StartedAt.IsZero() {
+				p.TTD = event.At.Sub(p.StartedAt).Round(time.Second).String()
+			}
+		case EventVerifyRun:
+			p.VerifyCount++
+			if p.TTR == "" && stringOf(event.Data["verdict"]) == verifier.VerdictPass && !p.StartedAt.IsZero() {
+				p.TTR = event.At.Sub(p.StartedAt).Round(time.Second).String()
+			}
+		}
+	}
 }
 
 func postmortemSkeleton(sessionID string, m *manifest.Manifest) Postmortem {
@@ -218,6 +241,15 @@ func lastEventTime(events []Event) time.Time {
 	return last
 }
 
+func firstEventTime(events []Event, eventType string) time.Time {
+	for _, event := range events {
+		if event.Type == eventType {
+			return event.At
+		}
+	}
+	return time.Time{}
+}
+
 func humanDuration(from, to time.Time) string {
 	if from.IsZero() || to.IsZero() || to.Before(from) {
 		return "unknown"
@@ -247,7 +279,14 @@ func (p Postmortem) Render() string {
 	b.WriteString(fmt.Sprintf("# Постмортем: %s\n\n", p.Title))
 	b.WriteString(fmt.Sprintf("- Сессия: `%s`\n- Задача: `%s`\n- Движок: %s\n- Начало: %s\n",
 		p.SessionID, p.TaskID, p.Engine, p.StartedAt.Format(time.RFC3339)))
-	b.WriteString(fmt.Sprintf("- Длительность: %s\n- Подсказок использовано: %d\n\n", p.Duration, p.HintsUsed))
+	b.WriteString(fmt.Sprintf("- Длительность: %s\n- Подсказок использовано: %d\n- Проверок: %d\n", p.Duration, p.HintsUsed, p.VerifyCount))
+	if p.TTD != "" {
+		b.WriteString("- TTD: " + p.TTD + "\n")
+	}
+	if p.TTR != "" {
+		b.WriteString("- TTR: " + p.TTR + "\n")
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## Таймлайн\n\n")
 	b.WriteString("| Время | Событие | Что произошло |\n|---|---|---|\n")
