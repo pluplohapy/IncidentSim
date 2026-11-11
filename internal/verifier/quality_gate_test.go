@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"incidentsim/internal/runtime"
@@ -206,6 +207,21 @@ func TestUnknownPolicyRuleFailsTheCheck(t *testing.T) {
 	}
 	if result.Detail == "" {
 		t.Fatal("the failure did not name the problem")
+	}
+}
+
+func TestReplayCheckRejectsEmptyObservation(t *testing.T) {
+	grader := NewManifestVerifier()
+	env := FakeEnvironment{}
+	result := grader.runQualityCheck(context.Background(), env, Check{
+		ID: "replay", Kind: CheckReplay, Field: "error_rate",
+		Expect: &Expectation{Max: floatPtr(0.01)},
+	}, NewSampler(), ReplayResult{})
+	if result.Passed {
+		t.Fatal("a replay check passed without any replayed request")
+	}
+	if !strings.Contains(result.Detail, "no requests") {
+		t.Fatalf("detail = %q, want no-request explanation", result.Detail)
 	}
 }
 

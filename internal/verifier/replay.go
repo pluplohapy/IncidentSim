@@ -56,6 +56,9 @@ type ReplayResult struct {
 	RequestsByClass   map[string]int            `json:"requests_by_class,omitempty"`
 	ErrorTypesByClass map[string]map[string]int `json:"error_types_by_class,omitempty"`
 	LatencyP99ByClass map[string]time.Duration  `json:"latency_p99_by_class,omitempty"`
+	// Error records a replay/profile failure. It is kept in the result so a
+	// replay quality check cannot accidentally pass with an empty observation.
+	Error string `json:"error,omitempty"`
 }
 
 // Passed reports whether the replayed load stayed within the expected error

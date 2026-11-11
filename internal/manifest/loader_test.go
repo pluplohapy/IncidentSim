@@ -253,6 +253,17 @@ func TestLoadTaskByID(t *testing.T) {
 	}
 }
 
+func TestValidateWithAssetsRejectsEscapingReplayPath(t *testing.T) {
+	manifestText := strings.Replace(validManifest, "  runtime:\n    engine: compose", "  runtime:\n    engine: compose\n  replay:\n    profile: ../outside.yaml\n    duration: 1s\n    rps: 1", 1)
+	m, err := Parse([]byte(manifestText))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := m.ValidateWithAssets(t.TempDir()); err == nil || !strings.Contains(err.Error(), "relative path inside the project") {
+		t.Fatalf("escaping replay path error = %v", err)
+	}
+}
+
 func TestValidateWithAssetsChecksReplayProfile(t *testing.T) {
 	m, err := Load("../../testdata/manifests/valid/db-connection-leak.yaml")
 	if err != nil {

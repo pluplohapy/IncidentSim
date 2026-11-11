@@ -292,6 +292,16 @@ func validateCheck(field string, check Check, services []string, gate string) []
 		if check.Query == "" {
 			issues = append(issues, Issue{Field: field, Message: "metric check requires query"})
 		}
+		if check.Service == "" || !contains(services, check.Service) {
+			issues = append(issues, Issue{Field: field + ".service", Message: "must reference a declared service"})
+		}
+		if check.Agg != "" {
+			switch check.Agg {
+			case "max", "min", "avg", "last", "p95", "slope", "delta", "resets":
+			default:
+				issues = append(issues, Issue{Field: field + ".agg", Message: "must be max, min, avg, last, p95, slope, delta or resets"})
+			}
+		}
 		if check.Expect == nil || (check.Expect.Min == nil && check.Expect.Max == nil) {
 			issues = append(issues, Issue{Field: field + ".expect", Message: "metric check requires expect.min or expect.max"})
 		}
@@ -306,6 +316,9 @@ func validateCheck(field string, check Check, services []string, gate string) []
 		if check.Pattern == "" {
 			issues = append(issues, Issue{Field: field, Message: "log check requires pattern"})
 		}
+		if check.Service == "" || !contains(services, check.Service) {
+			issues = append(issues, Issue{Field: field + ".service", Message: "must reference a declared service"})
+		}
 	case CheckPolicy:
 		if check.Rule == "" {
 			issues = append(issues, Issue{Field: field, Message: "policy check requires rule"})
@@ -317,6 +330,9 @@ func validateCheck(field string, check Check, services []string, gate string) []
 		if len(check.Command) == 0 {
 			issues = append(issues, Issue{Field: field, Message: "exec check requires command"})
 		}
+		if check.Service == "" || !contains(services, check.Service) {
+			issues = append(issues, Issue{Field: field + ".service", Message: "must reference a declared service"})
+		}
 	case CheckReplay:
 		switch check.Field {
 		case "error_rate", "success_rate", "p99_ms", "rps", "errors_reset":
@@ -326,6 +342,9 @@ func validateCheck(field string, check Check, services []string, gate string) []
 		if check.Expect == nil || (check.Expect.Min == nil && check.Expect.Max == nil) {
 			issues = append(issues, Issue{Field: field + ".expect", Message: "replay check requires expect.min or expect.max"})
 		}
+	case CheckUnit:
+		// The verifier locates hidden tests by task id; no service endpoint is
+		// required for a pure-code unit check.
 	default:
 		issues = append(issues, Issue{Field: field + ".type", Message: "unknown check type"})
 	}
@@ -399,21 +418,29 @@ func (m *Manifest) ValidateWithAssets(projectRoot string) error {
 	}
 	var issues []Issue
 	if m.Spec.Replay != nil && m.Spec.Replay.Profile != "" {
-		profile := filepath.Join(projectRoot, m.Spec.Replay.Profile)
-		if _, err := os.Stat(profile); err != nil {
-			issues = append(issues, Issue{
-				Field:   "spec.replay.profile",
-				Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Replay.Profile),
-			})
+		if !safeCatalogPath(m.Spec.Replay.Profile) {
+			issues = append(issues, Issue{Field: "spec.replay.profile", Message: "must be a relative path inside the project"})
+		} else {
+			profile := filepath.Join(projectRoot, m.Spec.Replay.Profile)
+			if _, err := os.Stat(profile); err != nil {
+				issues = append(issues, Issue{
+					Field:   "spec.replay.profile",
+					Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Replay.Profile),
+				})
+			}
 		}
 	}
 	if m.Spec.Verify.Replay != nil && m.Spec.Verify.Replay.Profile != "" {
-		profile := filepath.Join(projectRoot, m.Spec.Verify.Replay.Profile)
-		if _, err := os.Stat(profile); err != nil {
-			issues = append(issues, Issue{
-				Field:   "spec.verify.replay.profile",
-				Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Verify.Replay.Profile),
-			})
+		if !safeCatalogPath(m.Spec.Verify.Replay.Profile) {
+			issues = append(issues, Issue{Field: "spec.verify.replay.profile", Message: "must be a relative path inside the project"})
+		} else {
+			profile := filepath.Join(projectRoot, m.Spec.Verify.Replay.Profile)
+			if _, err := os.Stat(profile); err != nil {
+				issues = append(issues, Issue{
+					Field:   "spec.verify.replay.profile",
+					Message: fmt.Sprintf("replay profile %s is missing", m.Spec.Verify.Replay.Profile),
+				})
+			}
 		}
 	}
 	if len(issues) > 0 {
@@ -559,6 +586,10 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 		if m.Spec.Workspace == "" || m.Spec.Reference == "" {
 			continue
 		}
+		if !safeCatalogPath(m.Spec.Workspace) || !safeCatalogPath(m.Spec.Reference) {
+			issues = append(issues, Issue{Field: field + ".workspace", Message: "workspace and reference must be relative paths inside the project"})
+			continue
+		}
 		workspace := filepath.Join(projectRoot, m.Spec.Workspace)
 		reference := filepath.Join(projectRoot, m.Spec.Reference)
 		if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
@@ -650,6 +681,16 @@ func validateCatalogAssets(manifests []*Manifest, projectRoot string) error {
 		return &ValidationError{Issues: sortedIssues(issues)}
 	}
 	return nil
+}
+
+// safeCatalogPath prevents a manifest loaded from a repository from escaping
+// the project root when it names a workspace, reference, or replay profile.
+func safeCatalogPath(path string) bool {
+	if path == "" || filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(filepath.FromSlash(path))
+	return clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
 // workspaceSpoiler rejects answer-bearing comments and names from a participant

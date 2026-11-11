@@ -156,15 +156,15 @@ func (v *ManifestVerifier) runReplay(ctx context.Context, env Environment, check
 	}
 	requests, err := v.profileRequests(config)
 	if err != nil {
-		return ReplayResult{}
+		return ReplayResult{Error: err.Error()}
 	}
 	target := replayTarget(instance, checks)
 	if target == "" {
-		return ReplayResult{}
+		return ReplayResult{Error: "no reachable replay target"}
 	}
 	result, err := v.ReplayRunner.Replay(ctx, target, requests, *config)
 	if err != nil {
-		return ReplayResult{}
+		return ReplayResult{Error: err.Error()}
 	}
 	return result
 }
@@ -616,6 +616,12 @@ func copyDir(src, dst string) error {
 // or expect.max using the replay result from the single observation window.
 func (v *ManifestVerifier) checkReplay(ctx context.Context, env Environment, check Check, replayResult ReplayResult) Result {
 	result := Result{Check: check}
+	if replayResult.Error != "" {
+		return fail(result, "replay failed: "+replayResult.Error)
+	}
+	if replayResult.Requests+replayResult.Errors == 0 {
+		return fail(result, "replay produced no requests")
+	}
 	if check.Field == "" {
 		return fail(result, "replay check requires a field: error_rate|success_rate|p99_ms|rps|errors_reset")
 	}
