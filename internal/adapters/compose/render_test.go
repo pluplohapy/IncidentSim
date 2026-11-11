@@ -17,7 +17,10 @@ func testSpec() runtime.Spec {
 			{
 				Name:  "db",
 				Image: "postgres:16-alpine",
-				Env:   map[string]string{"POSTGRES_DB": "orders"},
+				Env: map[string]string{
+					"POSTGRES_DB":       "orders",
+					"POSTGRES_PASSWORD": "incidentsim",
+				},
 				// The database is reached through exec (SQL) and the Docker
 				// internal network; its port is not published to the host.
 			},

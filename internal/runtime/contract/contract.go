@@ -125,7 +125,7 @@ func Run(t *testing.T, factory func(t *testing.T) (runtime.Adapter, func()), nam
 		}
 
 		bin := filepath.Join(t.TempDir(), "service")
-		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho contract-binary\n"), 0o755); err != nil {
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\nwhile :; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 3\\r\\n\\r\\nok\\n' | nc -l -p 8080; done\n"), 0o755); err != nil {
 			t.Fatalf("write test binary: %v", err)
 		}
 

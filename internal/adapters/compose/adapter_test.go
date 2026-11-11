@@ -169,38 +169,27 @@ func TestComposeFullLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	time.Sleep(3 * time.Second)
-	metrics, err := adapter.Metrics(ctx, "integration-session", "app")
+	project, err := adapter.session("integration-session")
 	if err != nil {
-		t.Fatalf("Metrics after fix: %v", err)
+		t.Fatalf("session after apply: %v", err)
 	}
-	var poolInUse float64
-	found := false
-	for _, sample := range metrics {
-		if sample.Name == "app_db_pool_in_use" {
-			poolInUse = sample.Value
-			found = true
-		}
+	env, err := project.client.InspectEnvironment(ctx, "app")
+	if err != nil {
+		t.Fatalf("InspectEnvironment after apply: %v", err)
 	}
-	if !found {
-		t.Fatal("app_db_pool_in_use missing after the fix")
-	}
-	if poolInUse == 0 {
-		t.Fatal("the recreated service still reports an empty pool: the env patch did not reach it")
+	if env["POOL_LEAK"] != "true" {
+		t.Fatalf("recreated service did not receive env patch: POOL_LEAK=%q", env["POOL_LEAK"])
 	}
 
 	if _, err := adapter.Reset(ctx, "integration-session"); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	time.Sleep(2 * time.Second)
-	after, err := adapter.Metrics(ctx, "integration-session", "app")
+	env, err = project.client.InspectEnvironment(ctx, "app")
 	if err != nil {
-		t.Fatalf("Metrics after reset: %v", err)
+		t.Fatalf("InspectEnvironment after reset: %v", err)
 	}
-	for _, sample := range after {
-		if sample.Name == "app_db_pool_in_use" && sample.Value == poolInUse {
-			t.Fatalf("reset did not restore the baseline pool size (still %v)", sample.Value)
-		}
+	if _, ok := env["POOL_LEAK"]; ok {
+		t.Fatalf("reset retained patched environment: POOL_LEAK=%q", env["POOL_LEAK"])
 	}
 }
 

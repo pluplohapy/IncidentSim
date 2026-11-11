@@ -1,7 +1,6 @@
 package compose
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -491,8 +490,6 @@ func (a *Adapter) buildBinaryImage(ctx context.Context, project *session, art ru
 		docker = a.Docker
 	}
 	cmd := exec.CommandContext(ctx, docker, "build", "--platform", "linux/"+arch, "-t", tag, dir)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("docker build: %w: %s", err, string(out))
 	}
