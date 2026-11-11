@@ -6,26 +6,6 @@ import (
 	"incidentsim/internal/runtime"
 )
 
-// StubVerifier answers every verification with a fixed report. It exists so the
-// core and the CLI can be built and tested before the real grader, and so a
-// task graded by something other than the built-in grader (a human reviewer,
-// an external grading service) can be plugged in through the same interface.
-type StubVerifier struct {
-	// Report is returned as-is by Verify.
-	Report Report
-	// Called counts the verification runs.
-	Called int
-}
-
-// Verify implements Verifier.
-func (s *StubVerifier) Verify(ctx context.Context, env Environment, sessionID, taskID string, checks CheckSet) (Report, error) {
-	s.Called++
-	report := s.Report
-	report.SessionID = sessionID
-	report.TaskID = taskID
-	return report, nil
-}
-
 // FakeEnvironment is an in-memory verifier.Environment for tests. It lets a
 // check be exercised without an engine, which is what makes the
 // "distractor passes correctness, fails quality" test cheap.

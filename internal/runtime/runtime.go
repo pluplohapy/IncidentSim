@@ -49,8 +49,6 @@ type Service struct {
 	Endpoint string
 	// ContainerPort is the port the service listens on inside the environment.
 	ContainerPort int
-	// PID is the engine level pid (container or microVM), best effort.
-	PID int
 	// Healthcheck is the manifest healthcheck of the service, if any.
 	Healthcheck *HealthcheckSpec
 }

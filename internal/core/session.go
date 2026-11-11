@@ -14,7 +14,6 @@ const (
 	StateStarting  = "starting"
 	StateRunning   = "running"
 	StateVerifying = "verifying"
-	StateFinished  = "finished"
 	StateFailed    = "failed"
 	StateTornDown  = "torn_down"
 )

@@ -486,9 +486,6 @@ func (o *Orchestrator) Apply(ctx context.Context, sessionID string, patch runtim
 	return nil
 }
 
-// ExecSQL runs a statement against a database service of a session. It is the
-// participant's write path for a db-level task: `incidentsim apply --sql` ends
-// up here.
 // Exec runs an arbitrary command inside a service of a session.
 //
 // It is the participant's debug path: `incidentsim exec --service app -- sh -c

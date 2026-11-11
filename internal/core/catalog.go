@@ -23,7 +23,6 @@ type TaskSummary struct {
 	Quality          int      `json:"quality_checks"`
 	Distractors      int      `json:"distractors"`
 	Editable         []string `json:"editable,omitempty"`
-	Path             string   `json:"-"`
 }
 
 // Catalog is the set of tasks the deployment offers. It is loaded once at
@@ -108,7 +107,6 @@ func (c *Catalog) summariseLocked(m *manifest.Manifest) TaskSummary {
 		Quality:          len(m.Spec.Verify.Quality),
 		Distractors:      len(m.Spec.Distractors),
 		Editable:         m.Spec.Editable,
-		Path:             "",
 	}
 }
 

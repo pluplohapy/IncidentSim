@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -83,33 +81,4 @@ func (p *ReplayProfile) validate() error {
 		}
 	}
 	return nil
-}
-
-// UnmarshalYAML normalises the weight field, which YAML spells the same in both
-// shapes.
-func (r *Request) UnmarshalYAML(value *yaml.Node) error {
-	var raw requestProfile
-	if err := value.Decode(&raw); err != nil {
-		return err
-	}
-	r.Name = raw.Name
-	r.Method = raw.Method
-	r.Path = raw.Path
-	r.Weight = raw.Weight
-	return nil
-}
-
-// workloadLine parses a `weight:name:path` line of an inline replay profile.
-// Inline profiles exist so a task can carry its replay inside the manifest's
-// replay.profile field, which keeps a task in one file.
-func workloadLine(text string) (Request, bool) {
-	parts := strings.SplitN(text, ":", 3)
-	if len(parts) < 3 {
-		return Request{}, false
-	}
-	weight, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return Request{}, false
-	}
-	return Request{Weight: weight, Name: parts[1], Path: parts[2]}, true
 }

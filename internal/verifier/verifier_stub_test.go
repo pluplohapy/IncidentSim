@@ -67,20 +67,6 @@ func TestGateResultFailedResults(t *testing.T) {
 	}
 }
 
-func TestStubVerifierStampsSessionAndTask(t *testing.T) {
-	stub := StubVerifier{Report: NewReport("", "")}
-	report, err := stub.Verify(context.Background(), FakeEnvironment{}, "session-1", "task-1", CheckSet{})
-	if err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-	if report.SessionID != "session-1" || report.TaskID != "task-1" {
-		t.Fatalf("report = %s/%s, want session-1/task-1", report.SessionID, report.TaskID)
-	}
-	if stub.Called != 1 {
-		t.Fatalf("Called = %d, want 1", stub.Called)
-	}
-}
-
 func TestCheckSetEmpty(t *testing.T) {
 	if !(CheckSet{}).Empty() {
 		t.Error("empty check set reported as non-empty")
