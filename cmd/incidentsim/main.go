@@ -122,12 +122,12 @@ func usage() {
   incidentsim shell <session> [--service app]                      интерактивный терминал
   incidentsim edit <session> [файл]                                открыть $EDITOR на файле workspace
   incidentsim diff <session>                                       правки относительно исходного workspace
-  incidentsim apply <session> [--service app] [--file P --content T] применить фикс из workspace
+  incidentsim apply <session>                                       применить текущее состояние workspace
   incidentsim verify <session>                                     correctness + quality gate
   incidentsim hint <session> [--level N]                           подсказка по задаче
   incidentsim reset <session>                                      восстановить baseline
   incidentsim reveal <session>                                     ответ и разбор (после pass или give-up)
-  incidentsim give-up <session>                                    сдаться: открытьprivate вид задачи
+  incidentsim give-up <session>                                    сдаться: открыть закрытый вид задачи
   incidentsim postmortem <session> [--md]                          постмортем сессии
   incidentsim stop <session>                                       погасить окружение
   incidentsim sessions                                             активные сессии
