@@ -7,29 +7,27 @@ metadata:
   tags: [logs, disk]
   estimated_minutes: 25
 spec:
+  workspace: scenarios/log-flood-disk/workspace
+  reference: scenarios/log-flood-disk/reference
   runtime:
     engine: compose
   services:
     - name: app
       image: incidentsim/workload:dev
       env:
+        LOG_LEVEL: debug
         LOG_FILE: /var/log/app/app.log
       ports: [8080]
       healthcheck:
         path: /healthz
         port: 8080
+  editable: [config/app.conf]
   symptoms:
     - id: disk-full
       observation: "Метрика app_disk_used_pct приблизилась к 100, запись новых логов падает"
   hints:
     - level: 1
       text: "Посмотрите на размер файла лога и на уровень логирования"
-  fault:
-    type: feature_flag
-    target: app
-    options:
-      env:
-        LOG_LEVEL: debug
   verify:
     correctness:
       - id: healthz-200
@@ -48,11 +46,16 @@ spec:
       - id: log-level-info
         type: policy
         service: app
-        rule: env_flag_equals
+        rule: config_flag_equals
+        file: /etc/app/app.conf
         query: LOG_LEVEL
         expect:
           equals: info
         reason: "debug-логи в проде запрещены политикой, уровень должен быть info"
+    replay:
+      profile: workloads/log-flood-disk.yaml
+      duration: 30s
+      rps: 10
   root_cause:
     summary: "Включён debug-уровень логирования, файл лога растёт без ротации."
     layer: config
@@ -69,16 +72,18 @@ spec:
     summary: "Понизить LOG_LEVEL до info, включить ротацию, перезапустить сервис."
     steps:
       - "Проверить уровень логирования"
-      - "Выставить LOG_LEVEL=info"
+      - "Выставить LOG_LEVEL=info в config/app.conf и перезапустить сервис"
     commands:
-      - "incidentsim apply --service app --set LOG_LEVEL=info"
+      - "incidentsim edit <session> config/app.conf && incidentsim apply <session>"
+    rollback: "incidentsim reset <session>"
   distractors:
     - id: delete-log-file
       title: "Удалить файл лога, чтобы освободить диск"
       symptom: disk-full
       masked_artifact: "история логов, нужная для разбора"
       fails: log-history-preserved
-  replay:
-    profile: workloads/log-flood-disk.yaml
-    duration: 30s
-    rps: 10
+      apply:
+        kind: files
+        service: app
+        from: config/app.conf
+        to: config/app.conf
